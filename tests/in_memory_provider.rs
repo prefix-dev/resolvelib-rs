@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use resolvelib_rs::{
-    Criterion, Matches, Provider, RequirementInformation, ResolutionError, Resolver,
-};
+use resolvelib_rs::{Criterion, Provider, RequirementInformation, ResolutionError, Resolver};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Candidate {
@@ -79,7 +77,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
         identifier: Self::Identifier,
         requirements: HashMap<Self::Identifier, Vec<Self::Requirement>>,
         incompatibilities: HashMap<Self::Identifier, Vec<Self::Candidate>>,
-    ) -> Matches<Self::Candidate> {
+    ) -> Vec<Self::Candidate> {
         // Find all possible candidates that satisfy the given constraints
         let requirements = &requirements[&identifier];
 
@@ -104,7 +102,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
             candidates.extend(new_candidates);
         }
 
-        Matches { candidates }
+        candidates
     }
 
     fn is_satisfied_by(&self, requirement: Self::Requirement, candidate: Self::Candidate) -> bool {

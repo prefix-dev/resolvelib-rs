@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use thiserror::Error;
 
-use crate::provider::{Provider, RequirementInformation};
+use crate::provider::Provider;
 
 pub struct ResolutionResult<TRequirement, TCandidate, TIdentifier> {
     pub mapping: HashMap<TIdentifier, TCandidate>,
@@ -316,8 +316,7 @@ where
             )))
             .collect();
 
-        let matches = provider.find_matches(identifier, requirements, incompatibilities);
-        let candidates = matches.iter().collect();
+        let candidates = provider.find_matches(identifier, requirements, incompatibilities);
 
         let information = criterion
             .map(|c| c.information.as_slice())
@@ -448,7 +447,8 @@ where
                 Some(candidate),
             )?;
         }
-        return Ok(cloned_criteria);
+
+        Ok(cloned_criteria)
     }
 
     fn backjump(
@@ -574,11 +574,9 @@ where
                 .chain(std::iter::once((k, incompatibilities.to_vec())))
                 .collect();
 
-            let matches = self
+            let candidates = self
                 .provider
                 .find_matches(k, requirements, all_incompatibilities);
-
-            let candidates: Vec<_> = matches.iter().collect();
             if candidates.is_empty() {
                 return false;
             }
@@ -638,4 +636,10 @@ where
         let (provider, state) = resolution.resolve(requirements, max_rounds)?;
         Ok(state.build_result(&provider))
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct RequirementInformation<TRequirement, TCandidate> {
+    pub requirement: TRequirement,
+    pub parent: Option<TCandidate>,
 }
