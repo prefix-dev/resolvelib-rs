@@ -53,4 +53,12 @@ pub trait Provider {
 
     /// Produce a vector of requirements that represent a candidate's dependencies
     fn get_dependencies(&self, candidate: Self::Candidate) -> Vec<Self::Requirement>;
+
+    /// Called when the provider produces an inconsistent candidate (i.e. a candidate that does not
+    /// satisfy the requirements).
+    ///
+    /// Inconsistent candidates always trigger a panic, since they are an unrecoverable error as a
+    /// consequence of a buggy provider. This function can be used to investigate.
+    fn on_inconsistent_candidate(&self, _candidate: Self::Candidate, _requirements: Vec<Self::Requirement>) {
+    }
 }

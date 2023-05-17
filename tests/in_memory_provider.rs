@@ -3,14 +3,14 @@ use std::ops::Range;
 
 use resolvelib_rs::{Criterion, Provider, RequirementInformation, ResolutionError, Resolver};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Candidate {
     package_name: String,
     version: u64,
     deps: Vec<Requirement>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 struct Requirement {
     package_name: String,
     specifier: Range<u64>,
@@ -53,6 +53,10 @@ impl<'a> Provider for InMemoryProvider<'a> {
     type Requirement = &'a Requirement;
     type Identifier = &'a str;
 
+    fn on_inconsistent_candidate(&self, candidate: Self::Candidate, requirements: Vec<Self::Requirement>) {
+        panic!("Inconsistent candidate: {candidate:?} does not satisfy {requirements:?}");
+    }
+
     fn identify_candidate(&self, candidate: Self::Candidate) -> Self::Identifier {
         &candidate.package_name
     }
@@ -82,14 +86,15 @@ impl<'a> Provider for InMemoryProvider<'a> {
         let requirements = &requirements[&identifier];
 
         // For each requirement, derive candidates
-        let mut candidates = Vec::new();
+        let mut all_candidates = HashSet::new();
+        let mut first_requirement = true;
         for requirement in requirements {
             let incompatibilities = &incompatibilities[requirement.package_name.as_str()];
             let incompatible_versions: HashSet<_> =
                 incompatibilities.iter().map(|i| i.version).collect();
 
             // Consider only candidates that actually exist and that are not incompatible
-            let new_candidates = requirement
+            let new_candidates: HashSet<_> = requirement
                 .specifier
                 .clone()
                 .rev() // Highest versions come first so they are preferred (the returned candidates should be ordered by preference)
@@ -97,12 +102,40 @@ impl<'a> Provider for InMemoryProvider<'a> {
                     self.candidates
                         .get(&(requirement.package_name.as_str(), version))
                 })
-                .filter(|candidate| !incompatible_versions.contains(&candidate.version));
+                .filter(|candidate| !incompatible_versions.contains(&candidate.version))
+                .cloned()
+                .collect();
 
-            candidates.extend(new_candidates);
+            if first_requirement {
+                all_candidates = new_candidates;
+            } else {
+                all_candidates.retain(|c| new_candidates.contains(c));
+            }
+
+            first_requirement = false;
         }
 
-        candidates
+        println!("find_matches for {identifier}");
+        println!("requirements:");
+        for requirement in requirements {
+            println!(" {} {}..{}", requirement.package_name, requirement.specifier.start, requirement.specifier.end);
+        }
+        println!("candidates:");
+        let mut candidates: Vec<_> = all_candidates.iter().collect();
+        candidates.sort_by_key(|c| &c.package_name);
+        for candidate in &candidates {
+            println!(" {} {}", candidate.package_name, candidate.version)
+        }
+
+        let incompatibilities = &incompatibilities[&identifier];
+        if !incompatibilities.is_empty() {
+            println!("incompatible:");
+            for candidate in incompatibilities {
+                println!(" {} {}", candidate.package_name, candidate.version);
+            }
+        }
+
+        all_candidates.into_iter().collect()
     }
 
     fn is_satisfied_by(&self, requirement: Self::Requirement, candidate: Self::Candidate) -> bool {

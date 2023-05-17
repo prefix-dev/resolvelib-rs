@@ -18,6 +18,16 @@ pub struct Criterion<TRequirement, TCandidate> {
     pub incompatibilities: Vec<TCandidate>,
 }
 
+impl<TRequirement, TCandidate> Default for Criterion<TRequirement, TCandidate> {
+    fn default() -> Self {
+        Self {
+            candidates: Vec::new(),
+            information: Vec::new(),
+            incompatibilities: Vec::new(),
+        }
+    }
+}
+
 impl<TRequirement, TCandidate> Criterion<TRequirement, TCandidate>
 where
     TRequirement: Copy,
@@ -290,6 +300,12 @@ where
         }
     }
 
+    /// Adds the provided requirement to the criteria
+    ///
+    /// If a criterion already exists for the package identified by the requirement, it will be
+    /// updated to include the new requirement. If no criterion exists yet, it will be created.
+    ///
+    /// The candidate list of the criterion becomes the result of [`Provider::find_matches`]
     fn add_to_criteria(
         provider: &P,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
@@ -297,48 +313,32 @@ where
         parent: Option<P::Candidate>,
     ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
         let identifier = provider.identify_requirement(requirement);
-        let criterion = criteria.get(&identifier);
 
-        let known_incompatibilities = criterion.map_or(Vec::new(), |c| c.incompatibilities.clone());
-
-        let requirements = criteria
+        let mut all_requirements: HashMap<_, _> = criteria
             .iter()
             .map(|(&id, criterion)| (id, criterion.iter_requirement().collect()))
-            .chain(std::iter::once((identifier, vec![requirement])))
             .collect();
+        all_requirements.entry(identifier).or_insert(Vec::new()).push(requirement);
 
-        let incompatibilities = criteria
+        let mut all_incompatibilities: HashMap<_, _> = criteria
             .iter()
             .map(|(&id, criterion)| (id, criterion.incompatibilities.clone()))
-            .chain(std::iter::once((
-                identifier,
-                known_incompatibilities.clone(),
-            )))
             .collect();
+        all_incompatibilities.entry(identifier).or_insert(Vec::new());
 
-        let candidates = provider.find_matches(identifier, requirements, incompatibilities);
+        let candidates = provider.find_matches(identifier, all_requirements, all_incompatibilities);
 
-        let information = criterion
-            .map(|c| c.information.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .cloned()
-            .chain(std::iter::once(RequirementInformation {
-                requirement,
-                parent,
-            }))
-            .collect();
-
-        let criterion = Criterion {
-            information,
-            incompatibilities: known_incompatibilities,
-            candidates,
-        };
+        // Update the criterion in the map, with the new information and candidates
+        let criterion = criteria.entry(identifier).or_insert(Criterion::default());
+        criterion.candidates = candidates;
+        criterion.information.push(RequirementInformation {
+            requirement,
+            parent,
+        });
 
         if criterion.candidates.is_empty() {
-            Err(criterion)
+            Err(criterion.clone())
         } else {
-            criteria.insert(identifier, criterion);
             Ok(())
         }
     }
@@ -408,11 +408,15 @@ where
             // always pass under normal circumstances, but in the case of a
             // faulty provider, we will raise an error to notify the implementer
             // to fix find_matches() and/or is_satisfied_by().
-            let satisfied = criterion
-                .iter_requirement()
-                .all(|r| self.provider.is_satisfied_by(r, candidate));
-            if !satisfied {
-                panic!("Inconsistent candidate")
+            let mut unsatisfied = Vec::new();
+            for r in criterion.iter_requirement() {
+                if !self.provider.is_satisfied_by(r, candidate) {
+                    unsatisfied.push(r);
+                }
+            }
+            if !unsatisfied.is_empty() {
+                self.provider.on_inconsistent_candidate(candidate, unsatisfied);
+                panic!("inconsistent candidate");
             }
 
             // Add new criteria, update existing ones
