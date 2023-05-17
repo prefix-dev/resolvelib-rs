@@ -248,9 +248,7 @@ where
                     ));
                 }
             } else {
-                // discard as information sources any invalidated names
-                // (unsatisfied names that were previously satisfied)
-                let newly_unsatisfied_names = self
+                let invalidated_names = self
                     .state
                     .criteria
                     .iter()
@@ -260,10 +258,18 @@ where
                     .map(|(&k, _)| k)
                     .collect();
 
+                // Pinning succeeded, and the criteria have been updated to
+                // incorporate the requirements of the pinned candidate's
+                // dependencies. Because of that, it is possible that some
+                // mappings no longer satisfy the criteria (they are now more
+                // constrained).
+                //
+                // Here we remove the requirements contributed by the invalidated
+                // names (unsatisfied names that were previously satisfied)
                 Resolution::remove_information_from_criteria(
                     &self.provider,
                     &mut self.state.criteria,
-                    &newly_unsatisfied_names,
+                    &invalidated_names,
                 );
 
                 // Pinning was successful. Push a new state to do another pin.
@@ -274,18 +280,12 @@ where
         Err(ResolutionError::ResolutionTooDeep(max_rounds))
     }
 
+    /// Remove requirements contributed by the specified parents
     fn remove_information_from_criteria(
         provider: &P,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         parents: &HashSet<P::Identifier>,
     ) {
-        // Remove information from parents of criteria.
-        //
-        // Concretely, removes all values from each criterion's ``information``
-        // field that have one of ``parents`` as provider of the requirement.
-        //
-        // :param criteria: The criteria to update.
-        // :param parents: Identifiers for which to remove information from all criteria.
         if parents.is_empty() {
             return;
         }
