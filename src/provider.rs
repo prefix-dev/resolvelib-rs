@@ -44,8 +44,8 @@ pub trait Provider {
     fn find_matches(
         &self,
         identifier: Self::Identifier,
-        requirements: HashMap<Self::Identifier, Vec<Self::Requirement>>,
-        incompatibilities: HashMap<Self::Identifier, Vec<Self::Candidate>>,
+        requirements: &HashMap<Self::Identifier, Vec<Self::Requirement>>,
+        incompatibilities: &HashMap<Self::Identifier, Vec<Self::Candidate>>,
     ) -> Vec<Self::Candidate>;
 
     /// Whether the candidate satisfies the requirement
@@ -53,6 +53,9 @@ pub trait Provider {
 
     /// Produce a vector of requirements that represent a candidate's dependencies
     fn get_dependencies(&self, candidate: Self::Candidate) -> Vec<Self::Requirement>;
+
+    /// Produce a vector of requirements that represent a candidate's constraints
+    fn get_constraints(&self, candidate: Self::Candidate) -> Vec<Self::Requirement>;
 
     /// Called when the provider produces an inconsistent candidate (i.e. a candidate that does not
     /// satisfy the requirements).

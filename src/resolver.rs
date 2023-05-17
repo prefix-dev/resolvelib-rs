@@ -55,6 +55,7 @@ pub struct ResolutionState<TRequirement, TCandidate, TIdentifier> {
     mapping: HashMap<TIdentifier, TCandidate>,
     pinned_candidate_stack: Vec<TIdentifier>,
     criteria: HashMap<TIdentifier, Criterion<TRequirement, TCandidate>>,
+    constraints: HashMap<TIdentifier, Vec<RequirementInformation<TRequirement, TCandidate>>>,
     backtrack_causes: Vec<RequirementInformation<TRequirement, TCandidate>>,
 }
 
@@ -158,6 +159,7 @@ where
             state: ResolutionState {
                 mapping: HashMap::new(),
                 criteria: HashMap::new(),
+                constraints: HashMap::new(),
                 backtrack_causes: Vec::new(),
                 pinned_candidate_stack: Vec::new(),
             },
@@ -179,18 +181,17 @@ where
     > {
         // Initialize the root state
         for r in requirements {
-            Resolution::add_to_criteria(&self.provider, &mut self.state.criteria, r, None)
-                .map_err(|criterion| {
-                    ResolutionError::ResolutionImpossible(
-                        criterion
-                            .iter_requirement()
-                            .map(|r| RequirementInformation {
-                                requirement: r,
-                                parent: None,
-                            })
-                            .collect(),
-                    )
-                })?;
+            let req_info = RequirementInformation {
+                requirement: r,
+                parent: None,
+                kind: RequirementKind::Dependency,
+            };
+            Resolution::create_or_update_criterion(
+                &self.provider,
+                &mut self.state.criteria,
+                req_info,
+            )
+            .map_err(|criterion| ResolutionError::ResolutionImpossible(criterion.information))?;
         }
 
         // The root state is saved as a sentinel so the first ever pin can have
@@ -227,7 +228,7 @@ where
                 .min_by_key(|&&x| self.get_preference(x))
                 .unwrap();
 
-            let result = self.attempt_to_pin_criterion(name);
+            let result = self.attempt_to_pin_candidate(name);
             if let Err(failure_causes) = result {
                 let causes: Vec<_> = failure_causes
                     .iter()
@@ -306,13 +307,13 @@ where
     /// updated to include the new requirement. If no criterion exists yet, it will be created.
     ///
     /// The candidate list of the criterion becomes the result of [`Provider::find_matches`]
-    fn add_to_criteria(
+    fn create_or_update_criterion(
         provider: &P,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
-        requirement: P::Requirement,
-        parent: Option<P::Candidate>,
+        req_info: RequirementInformation<P::Requirement, P::Candidate>,
     ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
-        let identifier = provider.identify_requirement(requirement);
+        let requirement = req_info.requirement;
+        let identifier = provider.identify_requirement(req_info.requirement);
 
         let mut all_requirements: HashMap<_, _> = criteria
             .iter()
@@ -331,15 +332,13 @@ where
             .entry(identifier)
             .or_insert(Vec::new());
 
-        let candidates = provider.find_matches(identifier, all_requirements, all_incompatibilities);
+        let candidates =
+            provider.find_matches(identifier, &all_requirements, &all_incompatibilities);
 
-        // Update the criterion in the map, with the new information and candidates
+        // Update the criterion in the map, with the new req_info and candidates
         let criterion = criteria.entry(identifier).or_insert(Criterion::default());
         criterion.candidates = candidates;
-        criterion.information.push(RequirementInformation {
-            requirement,
-            parent,
-        });
+        criterion.information.push(req_info);
 
         if criterion.candidates.is_empty() {
             Err(criterion.clone())
@@ -347,7 +346,6 @@ where
             Ok(())
         }
     }
-
     /// Push a new state into history
     ///
     /// This new state will be used to hold resolution results of the next coming round
@@ -392,7 +390,7 @@ where
     ///
     /// If a candidate is found, update the state and return `Ok`. Otherwise, return
     /// an `Err` with the criteria that caused candidates to be discarded
-    fn attempt_to_pin_criterion(
+    fn attempt_to_pin_candidate(
         &mut self,
         id: P::Identifier,
     ) -> Result<(), Vec<Criterion<P::Requirement, P::Candidate>>> {
@@ -401,8 +399,27 @@ where
         let mut causes = Vec::new();
         for &candidate in &criterion.candidates {
             let mut updated_criteria = self.state.criteria.clone();
-            let result =
-                Resolution::update_criteria(&self.provider, &mut updated_criteria, candidate);
+
+            // Update constraints with those from the candidate we are attempting to pin
+            let mut updated_constraints = self.state.constraints.clone();
+            let result = Resolution::update_constraints(
+                &self.provider,
+                &mut updated_criteria,
+                &mut updated_constraints,
+                candidate,
+            );
+            if let Err(e) = result {
+                causes.push(e);
+                continue;
+            }
+
+            // Update the criteria
+            let result = Resolution::update_requirements(
+                &self.provider,
+                &mut updated_criteria,
+                &updated_constraints,
+                candidate,
+            );
             if let Err(e) = result {
                 causes.push(e);
                 continue;
@@ -442,17 +459,80 @@ where
         Err(causes)
     }
 
-    /// Constrains the criteria to satisfy the candidate's dependencies
+    /// Updates the criteria to satisfy the candidate's dependencies and constraints
     ///
     /// If the result is unsatisfiable, returns an `Err` containing the first criterion that had no
-    /// candidates left after being constrained
-    fn update_criteria(
+    /// candidates left after being updated
+    fn update_requirements(
         provider: &P,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
+        constraints: &HashMap<
+            P::Identifier,
+            Vec<RequirementInformation<P::Requirement, P::Candidate>>,
+        >,
         candidate: P::Candidate,
     ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
         for requirement in provider.get_dependencies(candidate) {
-            Resolution::add_to_criteria(provider, criteria, requirement, Some(candidate))?;
+            let identifier = provider.identify_requirement(requirement);
+            if !criteria.contains_key(&identifier) {
+                // If there is no criterion for this package, we will need to create it with the
+                // relevant constraints
+                if let Some(constraints) = constraints.get(&identifier) {
+                    for constraint in constraints {
+                        Resolution::create_or_update_criterion(
+                            provider,
+                            criteria,
+                            constraint.clone(),
+                        )?;
+                    }
+                }
+            }
+
+            let req_info = RequirementInformation {
+                requirement,
+                parent: Some(candidate),
+                kind: RequirementKind::Dependency,
+            };
+
+            // Update the criterion
+            Resolution::create_or_update_criterion(provider, criteria, req_info)?;
+        }
+
+        Ok(())
+    }
+
+    /// Tracks constraints contributed by the candidate, and updates each constraint's corresponding
+    /// criterion, if it exists
+    ///
+    /// If the result is unsatisfiable, returns an `Err` containing the first criterion that had no
+    /// candidates left after being constrained
+    fn update_constraints(
+        provider: &P,
+        criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
+        constraints: &mut HashMap<
+            P::Identifier,
+            Vec<RequirementInformation<P::Requirement, P::Candidate>>,
+        >,
+        candidate: P::Candidate,
+    ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
+        for requirement in provider.get_constraints(candidate) {
+            let req_info = RequirementInformation {
+                requirement,
+                parent: Some(candidate),
+                kind: RequirementKind::Constraint,
+            };
+
+            // Track the constraint
+            let identifier = provider.identify_requirement(requirement);
+            constraints
+                .entry(identifier)
+                .or_insert(Vec::new())
+                .push(req_info.clone());
+
+            // Update the constraint's criterion, if it exists
+            if criteria.contains_key(&identifier) {
+                Resolution::create_or_update_criterion(provider, criteria, req_info)?;
+            }
         }
 
         Ok(())
@@ -589,7 +669,7 @@ where
 
             let candidates = self
                 .provider
-                .find_matches(k, requirements, all_incompatibilities);
+                .find_matches(k, &requirements, &all_incompatibilities);
             if candidates.is_empty() {
                 return false;
             }
@@ -653,4 +733,11 @@ where
 pub struct RequirementInformation<TRequirement, TCandidate> {
     pub requirement: TRequirement,
     pub parent: Option<TCandidate>,
+    pub kind: RequirementKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequirementKind {
+    Dependency,
+    Constraint,
 }

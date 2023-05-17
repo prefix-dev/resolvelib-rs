@@ -10,6 +10,7 @@ struct Candidate {
     package_name: String,
     version: u64,
     deps: Vec<Requirement>,
+    constraints: Vec<Requirement>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -23,6 +24,21 @@ fn pkg(package_name: &str, version: u64, deps: Vec<Requirement>) -> Candidate {
         package_name: package_name.to_string(),
         version,
         deps,
+        constraints: Vec::new(),
+    }
+}
+
+fn pkg2(
+    package_name: &str,
+    version: u64,
+    deps: Vec<Requirement>,
+    constraints: Vec<Requirement>,
+) -> Candidate {
+    Candidate {
+        package_name: package_name.to_string(),
+        version,
+        deps,
+        constraints,
     }
 }
 
@@ -100,8 +116,8 @@ impl<'a> Provider for InMemoryProvider<'a> {
     fn find_matches(
         &self,
         identifier: Self::Identifier,
-        requirements: HashMap<Self::Identifier, Vec<Self::Requirement>>,
-        incompatibilities: HashMap<Self::Identifier, Vec<Self::Candidate>>,
+        requirements: &HashMap<Self::Identifier, Vec<Self::Requirement>>,
+        incompatibilities: &HashMap<Self::Identifier, Vec<Self::Candidate>>,
     ) -> Vec<Self::Candidate> {
         // Find all possible candidates that satisfy the given constraints
         let requirements = &requirements[&identifier];
@@ -136,6 +152,9 @@ impl<'a> Provider for InMemoryProvider<'a> {
             first_requirement = false;
         }
 
+        let mut all_candidates: Vec<_> = all_candidates.into_iter().collect();
+        all_candidates.sort_by(|c1, c2| c2.version.cmp(&c1.version));
+
         println!("find_matches for {identifier}");
         println!("requirements:");
         for requirement in requirements {
@@ -145,9 +164,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
             );
         }
         println!("candidates:");
-        let mut candidates: Vec<_> = all_candidates.iter().collect();
-        candidates.sort_by_key(|c| &c.package_name);
-        for candidate in &candidates {
+        for candidate in &all_candidates {
             println!(" {} {}", candidate.package_name, candidate.version)
         }
 
@@ -159,7 +176,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
             }
         }
 
-        all_candidates.into_iter().collect()
+        all_candidates
     }
 
     fn is_satisfied_by(&self, requirement: Self::Requirement, candidate: Self::Candidate) -> bool {
@@ -171,6 +188,10 @@ impl<'a> Provider for InMemoryProvider<'a> {
 
     fn get_dependencies(&self, candidate: Self::Candidate) -> Vec<Self::Requirement> {
         candidate.deps.iter().collect()
+    }
+
+    fn get_constraints(&self, candidate: Self::Candidate) -> Vec<Self::Requirement> {
+        candidate.constraints.iter().collect()
     }
 }
 
@@ -198,22 +219,11 @@ fn resolve_empty() {
 #[test]
 fn resolve_single() -> anyhow::Result<()> {
     // What the user wants to install
-    let req = Requirement {
-        package_name: "python".to_string(),
-        specifier: 5..10,
-    };
+    let req = req("python", 5..10);
 
     // Available packages
-    let p1 = Candidate {
-        package_name: "python".to_string(),
-        version: 9,
-        deps: Vec::new(),
-    };
-    let p2 = Candidate {
-        package_name: "python".to_string(),
-        version: 10,
-        deps: Vec::new(),
-    };
+    let p1 = pkg("python", 9, vec![]);
+    let p2 = pkg("python", 10, vec![]);
 
     // Register them in the provider
     let mut p = InMemoryProvider::default();
@@ -237,10 +247,7 @@ fn resolve_single() -> anyhow::Result<()> {
 
 #[test]
 fn resolve_non_existent() {
-    let req = Requirement {
-        package_name: "python".to_string(),
-        specifier: 0..10,
-    };
+    let req = req("python", 0..10);
 
     let mut p = InMemoryProvider::default();
     p.register_requirement(&req);
@@ -263,16 +270,8 @@ fn resolve_non_existent() {
 
 #[test]
 fn resolve_unsatisfiable_root() {
-    let req = Requirement {
-        package_name: "python".to_string(),
-        specifier: 0..10,
-    };
-
-    let package = Candidate {
-        package_name: "python".to_string(),
-        version: 42,
-        deps: Vec::new(),
-    };
+    let req = req("python", 0..10);
+    let package = pkg("python", 42, vec![]);
 
     let mut p = InMemoryProvider::default();
     p.register_requirement(&req);
@@ -296,19 +295,8 @@ fn resolve_unsatisfiable_root() {
 
 #[test]
 fn resolve_unsatisfiable_dep() {
-    let req = Requirement {
-        package_name: "python".to_string(),
-        specifier: 0..10,
-    };
-
-    let package = Candidate {
-        package_name: "python".to_string(),
-        version: 8,
-        deps: vec![Requirement {
-            package_name: "foo".to_string(),
-            specifier: 2..4,
-        }],
-    };
+    let package = pkg("python", 8, vec![req("foo", 2..4)]);
+    let req = req("python", 0..10);
 
     let mut p = InMemoryProvider::default();
     p.register_requirement(&req);
@@ -384,6 +372,41 @@ fn resolve_complex() {
         topo_sorted,
         &[None, Some("some-lib"), Some("python"), Some("foo")]
     );
+}
+
+#[test]
+fn resolve_with_inactive_constraints() {
+    let reqs = vec![req("A", 0..10)];
+
+    let pkgs = vec![
+        pkg("A", 5, vec![req("B", 0..10)]),
+        pkg2("B", 2, vec![], vec![req("C", 0..10)]),
+        pkg("C", 42, vec![]),
+    ];
+
+    // Package C is not required, so it won't be resolved
+    let result = resolve(&reqs, &pkgs);
+    assert_eq!(result.mapping["A"].version, 5);
+    assert_eq!(result.mapping["B"].version, 2);
+    assert!(!result.mapping.contains_key("C"));
+}
+
+#[test]
+fn resolve_with_active_constraints() {
+    let reqs = vec![req("A", 0..10)];
+
+    let pkgs = vec![
+        pkg("A", 5, vec![req("B", 0..10), req("C", 9..15)]),
+        pkg2("B", 2, vec![], vec![req("C", 0..10)]),
+        pkg("C", 12, vec![]),
+        pkg("C", 9, vec![]),
+    ];
+
+    // Package C is required, so it will be constrained to 0..10
+    let result = resolve(&reqs, &pkgs);
+    assert_eq!(result.mapping["A"].version, 5);
+    assert_eq!(result.mapping["B"].version, 2);
+    assert_eq!(result.mapping["C"].version, 9);
 }
 
 #[test]
