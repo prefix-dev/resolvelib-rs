@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use resolvelib_rs::{Criterion, Provider, RequirementInformation, ResolutionError, Resolver};
+use resolvelib_rs::{
+    Criterion, Provider, RequirementInformation, ResolutionError, ResolutionResult, Resolver,
+};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Candidate {
@@ -14,6 +16,21 @@ struct Candidate {
 struct Requirement {
     package_name: String,
     specifier: Range<u64>,
+}
+
+fn pkg(package_name: &str, version: u64, deps: Vec<Requirement>) -> Candidate {
+    Candidate {
+        package_name: package_name.to_string(),
+        version,
+        deps,
+    }
+}
+
+fn req(package_name: &str, specifier: Range<u64>) -> Requirement {
+    Requirement {
+        package_name: package_name.to_string(),
+        specifier,
+    }
 }
 
 #[derive(Default)]
@@ -53,7 +70,11 @@ impl<'a> Provider for InMemoryProvider<'a> {
     type Requirement = &'a Requirement;
     type Identifier = &'a str;
 
-    fn on_inconsistent_candidate(&self, candidate: Self::Candidate, requirements: Vec<Self::Requirement>) {
+    fn on_inconsistent_candidate(
+        &self,
+        candidate: Self::Candidate,
+        requirements: Vec<Self::Requirement>,
+    ) {
         panic!("Inconsistent candidate: {candidate:?} does not satisfy {requirements:?}");
     }
 
@@ -118,7 +139,10 @@ impl<'a> Provider for InMemoryProvider<'a> {
         println!("find_matches for {identifier}");
         println!("requirements:");
         for requirement in requirements {
-            println!(" {} {}..{}", requirement.package_name, requirement.specifier.start, requirement.specifier.end);
+            println!(
+                " {} {}..{}",
+                requirement.package_name, requirement.specifier.start, requirement.specifier.end
+            );
         }
         println!("candidates:");
         let mut candidates: Vec<_> = all_candidates.iter().collect();
@@ -148,6 +172,16 @@ impl<'a> Provider for InMemoryProvider<'a> {
     fn get_dependencies(&self, candidate: Self::Candidate) -> Vec<Self::Requirement> {
         candidate.deps.iter().collect()
     }
+}
+
+fn resolve<'a>(
+    reqs: &'a [Requirement],
+    pkgs: &'a [Candidate],
+) -> ResolutionResult<&'a Requirement, &'a Candidate, &'a str> {
+    let p = InMemoryProvider::from_requirements_and_candidates(reqs, pkgs);
+    let resolver = Resolver::new(p);
+    let result = resolver.resolve(reqs.iter().collect());
+    result.unwrap()
 }
 
 #[test]
@@ -298,63 +332,18 @@ fn resolve_unsatisfiable_dep() {
 
 #[test]
 fn resolve_complex() {
-    let reqs = vec![
-        Requirement {
-            package_name: "python".to_string(),
-            specifier: 0..10,
-        },
-        Requirement {
-            package_name: "some-lib".to_string(),
-            specifier: 12..15,
-        },
-    ];
+    let reqs = vec![req("python", 0..10), req("some-lib", 12..15)];
 
     let packages = vec![
         // Available versions of python
-        Candidate {
-            package_name: "python".to_string(),
-            version: 6,
-            deps: vec![Requirement {
-                package_name: "foo".to_string(),
-                specifier: 2..3,
-            }],
-        },
-        Candidate {
-            package_name: "python".to_string(),
-            version: 8,
-            deps: vec![Requirement {
-                package_name: "foo".to_string(),
-                specifier: 2..4,
-            }],
-        },
+        pkg("python", 6, vec![req("foo", 2..3)]),
+        pkg("python", 8, vec![req("foo", 2..4)]),
         // Available versions of foo
-        Candidate {
-            package_name: "foo".to_string(),
-            version: 2,
-            deps: Vec::new(),
-        },
-        Candidate {
-            package_name: "foo".to_string(),
-            version: 3,
-            deps: Vec::new(),
-        },
+        pkg("foo", 2, vec![]),
+        pkg("foo", 3, vec![]),
         // Available versions of some-lib
-        Candidate {
-            package_name: "some-lib".to_string(),
-            version: 12,
-            deps: vec![Requirement {
-                package_name: "python".to_string(),
-                specifier: 5..7,
-            }],
-        },
-        Candidate {
-            package_name: "some-lib".to_string(),
-            version: 15,
-            deps: vec![Requirement {
-                package_name: "python".to_string(),
-                specifier: 8..10,
-            }],
-        },
+        pkg("some-lib", 12, vec![req("python", 5..7)]),
+        pkg("some-lib", 15, vec![req("python", 8..10)]),
     ];
 
     let p = InMemoryProvider::from_requirements_and_candidates(&reqs, &packages);
@@ -395,4 +384,41 @@ fn resolve_complex() {
         topo_sorted,
         &[None, Some("some-lib"), Some("python"), Some("foo")]
     );
+}
+
+#[test]
+fn resolve_backtrack() {
+    // This is the dependency tree:
+    //
+    //     A
+    //    / \
+    //   B   C
+    //   |   |
+    //   E   E
+    //
+    // B prefers the latest version of E, which will be picked first
+    // C requires an older version of E, so it will cause a backtrack
+
+    let reqs = vec![req("A", 0..10)];
+
+    let packages = vec![
+        // A
+        pkg("A", 6, vec![req("B", 0..10), req("C", 0..10)]),
+        // B
+        pkg("B", 9, vec![req("E", 9..10)]),
+        pkg("B", 8, vec![req("E", 8..9)]),
+        // C
+        pkg("C", 9, vec![req("E", 0..9)]),
+        pkg("C", 8, vec![req("E", 0..9)]),
+        pkg("C", 7, vec![req("E", 0..9)]),
+        // E
+        pkg("E", 9, vec![]),
+        pkg("E", 8, vec![]),
+    ];
+
+    let solution = resolve(&reqs, &packages);
+    assert_eq!(solution.mapping["A"].version, 6);
+    assert_eq!(solution.mapping["B"].version, 8);
+    assert_eq!(solution.mapping["C"].version, 9);
+    assert_eq!(solution.mapping["E"].version, 8);
 }

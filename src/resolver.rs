@@ -53,7 +53,7 @@ pub enum ResolutionError<TRequirement, TCandidate> {
 #[derive(Default, Clone)]
 pub struct ResolutionState<TRequirement, TCandidate, TIdentifier> {
     mapping: HashMap<TIdentifier, TCandidate>,
-    candidate_stack: Vec<TIdentifier>,
+    pinned_candidate_stack: Vec<TIdentifier>,
     criteria: HashMap<TIdentifier, Criterion<TRequirement, TCandidate>>,
     backtrack_causes: Vec<RequirementInformation<TRequirement, TCandidate>>,
 }
@@ -159,7 +159,7 @@ where
                 mapping: HashMap::new(),
                 criteria: HashMap::new(),
                 backtrack_causes: Vec::new(),
-                candidate_stack: Vec::new(),
+                pinned_candidate_stack: Vec::new(),
             },
             states: Vec::new(),
             provider,
@@ -224,7 +224,7 @@ where
             // Choose the most preferred unpinned criterion to try.
             let &name = unsatisfied_names
                 .iter()
-                .min_by(|&&x, &&y| self.get_preference(x).cmp(&self.get_preference(y)))
+                .min_by_key(|&&x| self.get_preference(x))
                 .unwrap();
 
             let result = self.attempt_to_pin_criterion(name);
@@ -318,13 +318,18 @@ where
             .iter()
             .map(|(&id, criterion)| (id, criterion.iter_requirement().collect()))
             .collect();
-        all_requirements.entry(identifier).or_insert(Vec::new()).push(requirement);
+        all_requirements
+            .entry(identifier)
+            .or_insert(Vec::new())
+            .push(requirement);
 
         let mut all_incompatibilities: HashMap<_, _> = criteria
             .iter()
             .map(|(&id, criterion)| (id, criterion.incompatibilities.clone()))
             .collect();
-        all_incompatibilities.entry(identifier).or_insert(Vec::new());
+        all_incompatibilities
+            .entry(identifier)
+            .or_insert(Vec::new());
 
         let candidates = provider.find_matches(identifier, all_requirements, all_incompatibilities);
 
@@ -383,6 +388,10 @@ where
         )
     }
 
+    /// Attempts to find a suitable candidate for the package identified by `id`
+    ///
+    /// If a candidate is found, update the state and return `Ok`. Otherwise, return
+    /// an `Err` with the criteria that caused candidates to be discarded
     fn attempt_to_pin_criterion(
         &mut self,
         id: P::Identifier,
@@ -391,18 +400,13 @@ where
 
         let mut causes = Vec::new();
         for &candidate in &criterion.candidates {
-            let cloned_criteria = self.state.criteria.clone();
-            let criteria = match Resolution::get_updated_criteria(
-                &self.provider,
-                cloned_criteria,
-                candidate,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    causes.push(e);
-                    continue;
-                }
-            };
+            let mut updated_criteria = self.state.criteria.clone();
+            let result =
+                Resolution::update_criteria(&self.provider, &mut updated_criteria, candidate);
+            if let Err(e) = result {
+                causes.push(e);
+                continue;
+            }
 
             // Check the newly-pinned candidate actually works. This should
             // always pass under normal circumstances, but in the case of a
@@ -415,18 +419,21 @@ where
                 }
             }
             if !unsatisfied.is_empty() {
-                self.provider.on_inconsistent_candidate(candidate, unsatisfied);
+                self.provider
+                    .on_inconsistent_candidate(candidate, unsatisfied);
                 panic!("inconsistent candidate");
             }
 
-            // Add new criteria, update existing ones
-            for (id, criterion) in criteria {
+            // Add/update criteria
+            for (id, criterion) in updated_criteria {
                 self.state.criteria.insert(id, criterion);
             }
 
             // Put newly-pinned candidate at the end. This is essential because
             // backtracking looks at this mapping to get the last pin.
-            self.state.candidate_stack.push(id);
+            self.state.pinned_candidate_stack.push(id);
+
+            // Keep track of the chosen candidates
             self.state.mapping.insert(id, candidate);
 
             return Ok(());
@@ -435,24 +442,20 @@ where
         Err(causes)
     }
 
-    fn get_updated_criteria(
+    /// Constrains the criteria to satisfy the candidate's dependencies
+    ///
+    /// If the result is unsatisfiable, returns an `Err` containing the first criterion that had no
+    /// candidates left after being constrained
+    fn update_criteria(
         provider: &P,
-        mut cloned_criteria: HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
+        criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         candidate: P::Candidate,
-    ) -> Result<
-        HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
-        Criterion<P::Requirement, P::Candidate>,
-    > {
+    ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
         for requirement in provider.get_dependencies(candidate) {
-            Resolution::add_to_criteria(
-                provider,
-                &mut cloned_criteria,
-                requirement,
-                Some(candidate),
-            )?;
+            Resolution::add_to_criteria(provider, criteria, requirement, Some(candidate))?;
         }
 
-        Ok(cloned_criteria)
+        Ok(())
     }
 
     fn backjump(
@@ -489,7 +492,7 @@ where
         let incompatible_candidates = causes
             .iter()
             .flat_map(|c| c.parent)
-            .map(|req| self.provider.identify_candidate(req));
+            .map(|c| self.provider.identify_candidate(c));
 
         let incompatible_reqs = causes
             .iter()
@@ -501,10 +504,10 @@ where
         // Note: 1 less than in the Python code, because we are tracking the current state in its own field
         while self.states.len() >= 2 {
             // Ensure to backtrack to a state that caused the incompatibility
-            let (broken_state, candidate_id, candidate) = loop {
+            let (broken_state, candidate_id, broken_candidate) = loop {
                 // Retrieve the last candidate pin and known incompatibilities.
                 if let Some(mut broken_state) = self.states.pop() {
-                    if let Some(candidate_id) = broken_state.candidate_stack.pop() {
+                    if let Some(candidate_id) = broken_state.pinned_candidate_stack.pop() {
                         let candidate = broken_state.mapping[&candidate_id];
                         let mut current_dependencies = self
                             .provider
@@ -526,15 +529,18 @@ where
                 return Err(ResolutionError::ResolutionImpossible(causes.to_vec()));
             };
 
-            let candidates: &[_] = &[candidate];
-            let incompatibilities_from_broken = broken_state
+            let mut incompatibilities_from_broken: HashMap<_, _> = broken_state
                 .criteria
-                .iter()
-                .map(|(&key, value)| (key, value.incompatibilities.as_slice()))
-                .chain(std::iter::once((candidate_id, candidates)));
+                .into_iter()
+                .map(|(key, value)| (key, value.incompatibilities))
+                .collect();
+            incompatibilities_from_broken
+                .entry(candidate_id)
+                .or_insert(Vec::new())
+                .push(broken_candidate);
 
             self.restore_state();
-            let success = self.patch_criteria(incompatibilities_from_broken);
+            let success = self.patch_criteria(&incompatibilities_from_broken);
 
             // It works! Let's work on this new state.
             if success {
@@ -547,12 +553,12 @@ where
 
     fn patch_criteria<'a>(
         &mut self,
-        incompatibilities_from_broken: impl Iterator<Item = (P::Identifier, &'a [P::Candidate])>,
+        incompatibilities_from_broken: &HashMap<P::Identifier, Vec<P::Candidate>>,
     ) -> bool
     where
         P::Candidate: 'a,
     {
-        for (k, incompatibilities) in incompatibilities_from_broken {
+        for (&k, incompatibilities) in incompatibilities_from_broken {
             if incompatibilities.is_empty() {
                 continue;
             }
@@ -570,13 +576,16 @@ where
                 .map(|(&id, criterion)| (id, criterion.iter_requirement().collect::<Vec<_>>()))
                 .collect();
 
-            let all_incompatibilities = self
+            let mut all_incompatibilities: HashMap<_, _> = self
                 .state
                 .criteria
                 .iter()
                 .map(|(&id, criterion)| (id, criterion.incompatibilities.clone()))
-                .chain(std::iter::once((k, incompatibilities.to_vec())))
                 .collect();
+            all_incompatibilities
+                .entry(k)
+                .or_insert(Vec::new())
+                .extend(incompatibilities);
 
             let candidates = self
                 .provider
@@ -590,14 +599,12 @@ where
                 .cloned()
                 .chain(criterion.incompatibilities.iter().cloned())
                 .collect();
-            self.state.criteria.insert(
-                k,
-                Criterion {
-                    candidates,
-                    information: criterion.information.clone(),
-                    incompatibilities,
-                },
-            );
+
+            // Now update the criterion with relevant incompatibilities and the resulting set of
+            // candidates
+            let criterion = self.state.criteria.get_mut(&k).unwrap();
+            criterion.candidates = candidates;
+            criterion.incompatibilities = incompatibilities;
         }
 
         true
