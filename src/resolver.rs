@@ -47,9 +47,20 @@ where
 #[derive(Error, Debug)]
 pub enum ResolutionError<TRequirement, TCandidate> {
     #[error("resolution impossible")]
-    ResolutionImpossible(Vec<RequirementInformation<TRequirement, TCandidate>>),
+    ResolutionImpossible(ResolutionImpossible<TRequirement, TCandidate>),
     #[error("resolution too deep")]
     ResolutionTooDeep(u64),
+}
+
+#[derive(Debug)]
+pub struct ResolutionImpossible<TRequirement, TCandidate> {
+    unsatisfied: Vec<RequirementInformation<TRequirement, TCandidate>>,
+}
+
+impl<TRequirement, TCandidate> ResolutionImpossible<TRequirement, TCandidate> {
+    pub fn unsatisfied_requirements(&self) -> &[RequirementInformation<TRequirement, TCandidate>] {
+        &self.unsatisfied
+    }
 }
 
 #[derive(Default, Clone)]
@@ -147,7 +158,7 @@ where
 struct Resolution<'a, P: Provider, R: Reporter> {
     state: ResolutionState<P::Requirement, P::Candidate, P::Identifier>,
     states: Vec<ResolutionState<P::Requirement, P::Candidate, P::Identifier>>,
-    provider: P,
+    provider: &'a P,
     reporter: &'a R,
 }
 
@@ -158,7 +169,7 @@ where
     P::Identifier: Copy + Hash + Eq,
     R: Reporter<Requirement = P::Requirement, Candidate = P::Candidate, Identifier = P::Identifier>,
 {
-    fn new(provider: P, reporter: &'a R) -> Self {
+    fn new(provider: &'a P, reporter: &'a R) -> Self {
         Self {
             state: ResolutionState {
                 mapping: HashMap::new(),
@@ -178,10 +189,7 @@ where
         requirements: Vec<P::Requirement>,
         max_rounds: u64,
     ) -> Result<
-        (
-            P,
-            ResolutionState<P::Requirement, P::Candidate, P::Identifier>,
-        ),
+        ResolutionState<P::Requirement, P::Candidate, P::Identifier>,
         ResolutionError<P::Requirement, P::Candidate>,
     > {
         // Initialize the root state
@@ -193,12 +201,16 @@ where
                 kind: RequirementKind::Dependency,
             };
             Resolution::create_or_update_criterion(
-                &self.provider,
+                self.provider,
                 self.reporter,
                 &mut self.state.criteria,
                 req_info,
             )
-            .map_err(|criterion| ResolutionError::ResolutionImpossible(criterion.information))?;
+            .map_err(|criterion| {
+                ResolutionError::ResolutionImpossible(ResolutionImpossible {
+                    unsatisfied: criterion.information,
+                })
+            })?;
         }
 
         // The root state is saved as a sentinel so the first ever pin can have
@@ -221,7 +233,7 @@ where
             // All criteria are accounted for. Nothing more to pin, we are done!
             if unsatisfied_names.is_empty() {
                 self.reporter.ending(&self.state);
-                return Ok((self.provider, self.state));
+                return Ok(self.state);
             }
 
             // Keep track of satisfied names to calculate diff after pinning
@@ -265,7 +277,9 @@ where
 
                 if !success {
                     return Err(ResolutionError::ResolutionImpossible(
-                        self.state.backtrack_causes.clone(),
+                        ResolutionImpossible {
+                            unsatisfied: self.state.backtrack_causes.clone(),
+                        },
                     ));
                 }
             } else {
@@ -408,7 +422,7 @@ where
             // Update constraints with those from the candidate we are attempting to pin
             let mut updated_constraints = self.state.constraints.clone();
             let result = Resolution::update_constraints(
-                &self.provider,
+                self.provider,
                 self.reporter,
                 &mut updated_criteria,
                 &mut updated_constraints,
@@ -421,7 +435,7 @@ where
 
             // Update the criteria
             let result = Resolution::update_requirements(
-                &self.provider,
+                self.provider,
                 self.reporter,
                 &mut updated_criteria,
                 &updated_constraints,
@@ -620,7 +634,11 @@ where
                 }
 
                 // Unable to backtrack anymore
-                return Err(ResolutionError::ResolutionImpossible(causes.to_vec()));
+                return Err(ResolutionError::ResolutionImpossible(
+                    ResolutionImpossible {
+                        unsatisfied: causes.to_vec(),
+                    },
+                ));
             };
 
             let mut incompatibilities_from_broken: HashMap<_, _> = broken_state
@@ -705,7 +723,7 @@ where
 }
 
 pub struct Resolver<'a, P: Provider, R: Reporter> {
-    provider: P,
+    provider: &'a P,
     reporter: &'a R,
 }
 
@@ -716,7 +734,7 @@ where
     P::Identifier: Copy + Hash + Eq + Ord,
     R: Reporter<Candidate = P::Candidate, Requirement = P::Requirement, Identifier = P::Identifier>,
 {
-    pub fn new(provider: P, reporter: &'a R) -> Self {
+    pub fn new(provider: &'a P, reporter: &'a R) -> Self {
         Self { provider, reporter }
     }
 
@@ -739,8 +757,8 @@ where
         ResolutionError<P::Requirement, P::Candidate>,
     > {
         let resolution = Resolution::new(self.provider, self.reporter);
-        let (provider, state) = resolution.resolve(requirements, max_rounds)?;
-        Ok(state.build_result(&provider))
+        let state = resolution.resolve(requirements, max_rounds)?;
+        Ok(state.build_result(self.provider))
     }
 }
 

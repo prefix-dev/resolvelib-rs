@@ -3,7 +3,7 @@ mod reporter;
 mod resolver;
 
 pub use provider::Provider;
-pub use reporter::Reporter;
+pub use reporter::{NoOpReporter, Reporter};
 pub use resolver::{
     Criterion, RequirementInformation, RequirementKind, ResolutionError, ResolutionResult, Resolver,
 };

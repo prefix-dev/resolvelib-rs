@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use crate::resolver::ResolutionState;
 use crate::RequirementInformation;
 
@@ -40,4 +41,22 @@ pub trait Reporter {
 
     /// Called when adding a candidate to the potential solution
     fn pinning(&self, _candidate: Self::Candidate) {}
+}
+
+pub struct NoOpReporter<TRequirement, TCandidate, TIdentifier> {
+    phantom: PhantomData<(TRequirement, TCandidate, TIdentifier)>,
+}
+
+impl<TRequirement, TCandidate, TIdentifier> NoOpReporter<TRequirement, TCandidate, TIdentifier> {
+    pub fn new() -> Self {
+        Self {
+            phantom: PhantomData::default()
+        }
+    }
+}
+
+impl<TRequirement, TCandidate, TIdentifier> Reporter for NoOpReporter<TRequirement, TCandidate, TIdentifier> {
+    type Requirement = TRequirement;
+    type Candidate = TCandidate;
+    type Identifier = TIdentifier;
 }

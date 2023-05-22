@@ -249,7 +249,7 @@ fn try_resolve_and_report<'a>(
 ) {
     let p = InMemoryProvider::from_candidates(pkgs);
     let r = TrackingReporter::new();
-    let resolver = Resolver::new(p, &r);
+    let resolver = Resolver::new(&p, &r);
     let result = resolver.resolve(reqs.iter().collect());
     (result, r.operations.into_inner())
 }
@@ -297,11 +297,12 @@ fn resolve_non_existent() {
     assert!(result.is_err());
     let err = result.err().unwrap();
 
-    if let ResolutionError::ResolutionImpossible(candidates) = err {
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].parent, None);
-        assert_eq!(candidates[0].requirement.package_name, "python");
-        assert_eq!(candidates[0].requirement.specifier, 0..10);
+    if let ResolutionError::ResolutionImpossible(err) = err {
+        let unsatisfied = err.unsatisfied_requirements();
+        assert_eq!(unsatisfied.len(), 1);
+        assert_eq!(unsatisfied[0].parent, None);
+        assert_eq!(unsatisfied[0].requirement.package_name, "python");
+        assert_eq!(unsatisfied[0].requirement.specifier, 0..10);
     } else {
         panic!("Wrong error type")
     }
@@ -316,11 +317,12 @@ fn resolve_unsatisfiable_root() {
     assert!(result.is_err());
     let err = result.err().unwrap();
 
-    if let ResolutionError::ResolutionImpossible(candidates) = err {
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].parent, None);
-        assert_eq!(candidates[0].requirement.package_name, "python");
-        assert_eq!(candidates[0].requirement.specifier, 0..10);
+    if let ResolutionError::ResolutionImpossible(err) = err {
+        let unsatisfied = err.unsatisfied_requirements();
+        assert_eq!(unsatisfied.len(), 1);
+        assert_eq!(unsatisfied[0].parent, None);
+        assert_eq!(unsatisfied[0].requirement.package_name, "python");
+        assert_eq!(unsatisfied[0].requirement.specifier, 0..10);
     } else {
         panic!("Wrong error type")
     }
@@ -336,11 +338,12 @@ fn resolve_unsatisfiable_dep() {
     assert!(result.is_err());
     let err = result.err().unwrap();
 
-    if let ResolutionError::ResolutionImpossible(candidates) = err {
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].parent.unwrap(), &pkgs[0]);
-        assert_eq!(candidates[0].requirement.package_name, "foo");
-        assert_eq!(candidates[0].requirement.specifier, 2..4);
+    if let ResolutionError::ResolutionImpossible(err) = err {
+        let unsatisfied = err.unsatisfied_requirements();
+        assert_eq!(unsatisfied.len(), 1);
+        assert_eq!(unsatisfied[0].parent.unwrap(), &pkgs[0]);
+        assert_eq!(unsatisfied[0].requirement.package_name, "foo");
+        assert_eq!(unsatisfied[0].requirement.specifier, 2..4);
     } else {
         panic!("Wrong error type")
     }
@@ -363,11 +366,14 @@ fn resolve_complex() {
     ];
 
     let (result, ops) = resolve(&reqs, &pkgs);
-    check_ops(&ops, r"
+    check_ops(
+        &ops,
+        r"
         pin some-lib=12
         pin python=6
         pin foo=2
-    ");
+    ",
+    );
 
     assert_eq!(result.mapping.len(), 3);
     assert_eq!(result.criteria.len(), 3);
