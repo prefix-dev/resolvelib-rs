@@ -1,9 +1,11 @@
 use petgraph::graphmap::DiGraphMap;
+use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use thiserror::Error;
 
 use crate::provider::Provider;
+use crate::Reporter;
 
 pub struct ResolutionResult<TRequirement, TCandidate, TIdentifier> {
     pub mapping: HashMap<TIdentifier, TCandidate>,
@@ -11,7 +13,7 @@ pub struct ResolutionResult<TRequirement, TCandidate, TIdentifier> {
     pub criteria: HashMap<TIdentifier, Criterion<TRequirement, TCandidate>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Criterion<TRequirement, TCandidate> {
     pub candidates: Vec<TCandidate>,
     pub information: Vec<RequirementInformation<TRequirement, TCandidate>>,
@@ -142,19 +144,21 @@ where
     }
 }
 
-pub struct Resolution<P: Provider> {
+struct Resolution<'a, P: Provider, R: Reporter> {
     state: ResolutionState<P::Requirement, P::Candidate, P::Identifier>,
     states: Vec<ResolutionState<P::Requirement, P::Candidate, P::Identifier>>,
     provider: P,
+    reporter: &'a R,
 }
 
-impl<P: Provider> Resolution<P>
+impl<'a, P: Provider, R> Resolution<'a, P, R>
 where
     P::Requirement: Copy,
     P::Candidate: Copy,
     P::Identifier: Copy + Hash + Eq,
+    R: Reporter<Requirement = P::Requirement, Candidate = P::Candidate, Identifier = P::Identifier>,
 {
-    fn new(provider: P) -> Self {
+    fn new(provider: P, reporter: &'a R) -> Self {
         Self {
             state: ResolutionState {
                 mapping: HashMap::new(),
@@ -165,6 +169,7 @@ where
             },
             states: Vec::new(),
             provider,
+            reporter,
         }
     }
 
@@ -180,6 +185,7 @@ where
         ResolutionError<P::Requirement, P::Candidate>,
     > {
         // Initialize the root state
+        self.reporter.starting();
         for r in requirements {
             let req_info = RequirementInformation {
                 requirement: r,
@@ -188,6 +194,7 @@ where
             };
             Resolution::create_or_update_criterion(
                 &self.provider,
+                self.reporter,
                 &mut self.state.criteria,
                 req_info,
             )
@@ -199,8 +206,11 @@ where
         // pinning the virtual "root" package in the graph.
         self.push_new_state();
 
-        for _ in 0..max_rounds {
-            let unsatisfied_names: HashSet<_> = self
+        for i in 0..max_rounds {
+            self.reporter.starting_round(i);
+
+            // Note: using FxHashSet here for determinism
+            let unsatisfied_names: FxHashSet<_> = self
                 .state
                 .criteria
                 .iter()
@@ -210,6 +220,7 @@ where
 
             // All criteria are accounted for. Nothing more to pin, we are done!
             if unsatisfied_names.is_empty() {
+                self.reporter.ending(&self.state);
                 return Ok((self.provider, self.state));
             }
 
@@ -220,12 +231,19 @@ where
                 .keys()
                 .cloned()
                 .filter(|name| !unsatisfied_names.contains(name))
-                .collect::<HashSet<_>>();
+                .collect::<FxHashSet<_>>();
 
             // Choose the most preferred unpinned criterion to try.
             let &name = unsatisfied_names
                 .iter()
-                .min_by_key(|&&x| self.get_preference(x))
+                .min_by_key(|&&x| {
+                    self.provider.get_preference(
+                        x,
+                        &self.state.mapping,
+                        &self.state.criteria,
+                        &self.state.backtrack_causes,
+                    )
+                })
                 .unwrap();
 
             let result = self.attempt_to_pin_candidate(name);
@@ -235,6 +253,8 @@ where
                     .flat_map(|c| &c.information)
                     .cloned()
                     .collect();
+
+                self.reporter.resolving_conflicts(&causes);
 
                 // Backjump if pinning fails. The backjump process puts us in
                 // an unpinned state, so we can work on it in the next round.
@@ -259,42 +279,33 @@ where
                     .map(|(&k, _)| k)
                     .collect();
 
-                // Pinning succeeded, and the criteria have been updated to
-                // incorporate the requirements of the pinned candidate's
-                // dependencies. Because of that, it is possible that some
-                // mappings no longer satisfy the criteria (they are now more
-                // constrained).
+                // If the previous iteration backtracked, and the current iteration
+                // succeeded at pinning, we will need to remove outdated mappings
                 //
                 // Here we remove the requirements contributed by the invalidated
                 // names (unsatisfied names that were previously satisfied)
-                Resolution::remove_information_from_criteria(
-                    &self.provider,
-                    &mut self.state.criteria,
-                    &invalidated_names,
-                );
+                self.remove_information_from_criteria(&invalidated_names);
 
                 // Pinning was successful. Push a new state to do another pin.
                 self.push_new_state()
             }
+
+            self.reporter.ending_round(i);
         }
 
         Err(ResolutionError::ResolutionTooDeep(max_rounds))
     }
 
     /// Remove requirements contributed by the specified parents
-    fn remove_information_from_criteria(
-        provider: &P,
-        criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
-        parents: &HashSet<P::Identifier>,
-    ) {
+    fn remove_information_from_criteria(&mut self, parents: &HashSet<P::Identifier>) {
         if parents.is_empty() {
             return;
         }
 
-        for criterion in criteria.values_mut() {
+        for criterion in self.state.criteria.values_mut() {
             criterion.information.retain(|information| {
                 information.parent.map_or(true, |parent| {
-                    let id = provider.identify_candidate(parent);
+                    let id = self.provider.identify_candidate(parent);
                     !parents.contains(&id)
                 })
             })
@@ -309,9 +320,12 @@ where
     /// The candidate list of the criterion becomes the result of [`Provider::find_matches`]
     fn create_or_update_criterion(
         provider: &P,
+        reporter: &R,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         req_info: RequirementInformation<P::Requirement, P::Candidate>,
     ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
+        reporter.adding_requirement(&req_info);
+
         let requirement = req_info.requirement;
         let identifier = provider.identify_requirement(req_info.requirement);
 
@@ -377,15 +391,6 @@ where
         }
     }
 
-    fn get_preference(&self, id: P::Identifier) -> u64 {
-        self.provider.get_preference(
-            id,
-            &self.state.mapping,
-            &self.state.criteria,
-            &self.state.backtrack_causes,
-        )
-    }
-
     /// Attempts to find a suitable candidate for the package identified by `id`
     ///
     /// If a candidate is found, update the state and return `Ok`. Otherwise, return
@@ -404,6 +409,7 @@ where
             let mut updated_constraints = self.state.constraints.clone();
             let result = Resolution::update_constraints(
                 &self.provider,
+                self.reporter,
                 &mut updated_criteria,
                 &mut updated_constraints,
                 candidate,
@@ -416,6 +422,7 @@ where
             // Update the criteria
             let result = Resolution::update_requirements(
                 &self.provider,
+                self.reporter,
                 &mut updated_criteria,
                 &updated_constraints,
                 candidate,
@@ -441,6 +448,8 @@ where
                 panic!("inconsistent candidate");
             }
 
+            self.reporter.pinning(candidate);
+
             // Add/update criteria
             for (id, criterion) in updated_criteria {
                 self.state.criteria.insert(id, criterion);
@@ -465,6 +474,7 @@ where
     /// candidates left after being updated
     fn update_requirements(
         provider: &P,
+        reporter: &R,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         constraints: &HashMap<
             P::Identifier,
@@ -481,6 +491,7 @@ where
                     for constraint in constraints {
                         Resolution::create_or_update_criterion(
                             provider,
+                            reporter,
                             criteria,
                             constraint.clone(),
                         )?;
@@ -495,7 +506,7 @@ where
             };
 
             // Update the criterion
-            Resolution::create_or_update_criterion(provider, criteria, req_info)?;
+            Resolution::create_or_update_criterion(provider, reporter, criteria, req_info)?;
         }
 
         Ok(())
@@ -508,6 +519,7 @@ where
     /// candidates left after being constrained
     fn update_constraints(
         provider: &P,
+        reporter: &R,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         constraints: &mut HashMap<
             P::Identifier,
@@ -531,7 +543,7 @@ where
 
             // Update the constraint's criterion, if it exists
             if criteria.contains_key(&identifier) {
-                Resolution::create_or_update_criterion(provider, criteria, req_info)?;
+                Resolution::create_or_update_criterion(provider, reporter, criteria, req_info)?;
             }
         }
 
@@ -581,8 +593,10 @@ where
         let incompatible_deps: HashSet<_> =
             incompatible_candidates.chain(incompatible_reqs).collect();
 
-        // Note: 1 less than in the Python code, because we are tracking the current state in its own field
+        let mut i = 1;
         while self.states.len() >= 2 {
+            i += 1;
+
             // Ensure to backtrack to a state that caused the incompatibility
             let (broken_state, candidate_id, broken_candidate) = loop {
                 // Retrieve the last candidate pin and known incompatibilities.
@@ -620,10 +634,12 @@ where
                 .push(broken_candidate);
 
             self.restore_state();
+
             let success = self.patch_criteria(&incompatibilities_from_broken);
 
             // It works! Let's work on this new state.
             if success {
+                self.reporter.backtracked(i);
                 return Ok(true);
             }
         }
@@ -631,13 +647,10 @@ where
         Ok(false)
     }
 
-    fn patch_criteria<'a>(
+    fn patch_criteria(
         &mut self,
         incompatibilities_from_broken: &HashMap<P::Identifier, Vec<P::Candidate>>,
-    ) -> bool
-    where
-        P::Candidate: 'a,
-    {
+    ) -> bool {
         for (&k, incompatibilities) in incompatibilities_from_broken {
             if incompatibilities.is_empty() {
                 continue;
@@ -691,18 +704,20 @@ where
     }
 }
 
-pub struct Resolver<P: Provider> {
+pub struct Resolver<'a, P: Provider, R: Reporter> {
     provider: P,
+    reporter: &'a R,
 }
 
-impl<P: Provider> Resolver<P>
+impl<'a, P: Provider, R: Reporter> Resolver<'a, P, R>
 where
     P::Requirement: Copy,
     P::Candidate: Copy,
     P::Identifier: Copy + Hash + Eq + Ord,
+    R: Reporter<Candidate = P::Candidate, Requirement = P::Requirement, Identifier = P::Identifier>,
 {
-    pub fn new(provider: P) -> Self {
-        Self { provider }
+    pub fn new(provider: P, reporter: &'a R) -> Self {
+        Self { provider, reporter }
     }
 
     pub fn resolve(
@@ -723,7 +738,7 @@ where
         ResolutionResult<P::Requirement, P::Candidate, P::Identifier>,
         ResolutionError<P::Requirement, P::Candidate>,
     > {
-        let resolution = Resolution::new(self.provider);
+        let resolution = Resolution::new(self.provider, self.reporter);
         let (provider, state) = resolution.resolve(requirements, max_rounds)?;
         Ok(state.build_result(&provider))
     }

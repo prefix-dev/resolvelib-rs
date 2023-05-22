@@ -1,9 +1,8 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use resolvelib_rs::{
-    Criterion, Provider, RequirementInformation, ResolutionError, ResolutionResult, Resolver,
-};
+use resolvelib_rs::{Provider, Reporter, ResolutionError, ResolutionResult, Resolver};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Candidate {
@@ -49,35 +48,67 @@ fn req(package_name: &str, specifier: Range<u64>) -> Requirement {
     }
 }
 
+struct TrackingReporter<'a> {
+    operations: RefCell<Vec<Operation<'a>>>,
+}
+
+impl TrackingReporter<'_> {
+    fn new() -> Self {
+        Self {
+            operations: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl<'a> Reporter for TrackingReporter<'a> {
+    type Requirement = &'a Requirement;
+    type Candidate = &'a Candidate;
+    type Identifier = &'a str;
+
+    fn backtracked(&self, steps: u64) {
+        self.operations
+            .borrow_mut()
+            .push(Operation::Backtrack(steps));
+    }
+
+    fn pinning(&self, candidate: Self::Candidate) {
+        self.operations
+            .borrow_mut()
+            .push(Operation::PinCandidate(candidate));
+    }
+}
+
+#[derive(Debug)]
+enum Operation<'a> {
+    PinCandidate(&'a Candidate),
+    Backtrack(u64),
+}
+
+impl<'a> ToString for Operation<'a> {
+    fn to_string(&self) -> String {
+        use Operation::*;
+        match self {
+            Backtrack(steps) => format!("backtrack {steps}"),
+            PinCandidate(candidate) => {
+                format!("pin {}={}", candidate.package_name, candidate.version)
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct InMemoryProvider<'a> {
     candidates: HashMap<(&'a str, u64), &'a Candidate>,
-    requirements: Vec<&'a Requirement>,
 }
 
 impl<'a> InMemoryProvider<'a> {
-    fn from_requirements_and_candidates(
-        requirements: &'a [Requirement],
-        candidates: &'a [Candidate],
-    ) -> Self {
+    fn from_candidates(candidates: &'a [Candidate]) -> Self {
         InMemoryProvider {
-            requirements: requirements.iter().collect(),
             candidates: candidates
                 .iter()
                 .map(|c| ((c.package_name.as_str(), c.version), c))
                 .collect(),
         }
-    }
-
-    fn register_candidate(&mut self, candidate: &'a Candidate) {
-        self.candidates.insert(
-            (candidate.package_name.as_str(), candidate.version),
-            candidate,
-        );
-    }
-
-    fn register_requirement(&mut self, requirement: &'a Requirement) {
-        self.requirements.push(requirement);
     }
 }
 
@@ -86,31 +117,12 @@ impl<'a> Provider for InMemoryProvider<'a> {
     type Requirement = &'a Requirement;
     type Identifier = &'a str;
 
-    fn on_inconsistent_candidate(
-        &self,
-        candidate: Self::Candidate,
-        requirements: Vec<Self::Requirement>,
-    ) {
-        panic!("Inconsistent candidate: {candidate:?} does not satisfy {requirements:?}");
-    }
-
     fn identify_candidate(&self, candidate: Self::Candidate) -> Self::Identifier {
         &candidate.package_name
     }
 
     fn identify_requirement(&self, requirement: Self::Requirement) -> Self::Identifier {
         &requirement.package_name
-    }
-
-    fn get_preference(
-        &self,
-        _identifier: Self::Identifier,
-        _resolutions: &HashMap<Self::Identifier, Self::Candidate>,
-        criteria: &HashMap<Self::Identifier, Criterion<Self::Requirement, Self::Candidate>>,
-        _backtrack_causes: &[RequirementInformation<Self::Requirement, Self::Candidate>],
-    ) -> u64 {
-        // Requirements with less candidates are picked to be resolved first
-        criteria.len() as u64
     }
 
     fn find_matches(
@@ -193,24 +205,60 @@ impl<'a> Provider for InMemoryProvider<'a> {
     fn get_constraints(&self, candidate: Self::Candidate) -> Vec<Self::Requirement> {
         candidate.constraints.iter().collect()
     }
+
+    fn on_inconsistent_candidate(
+        &self,
+        candidate: Self::Candidate,
+        requirements: Vec<Self::Requirement>,
+    ) {
+        panic!("Inconsistent candidate: {candidate:?} does not satisfy {requirements:?}");
+    }
 }
 
 fn resolve<'a>(
     reqs: &'a [Requirement],
     pkgs: &'a [Candidate],
-) -> ResolutionResult<&'a Requirement, &'a Candidate, &'a str> {
-    let p = InMemoryProvider::from_requirements_and_candidates(reqs, pkgs);
-    let resolver = Resolver::new(p);
+) -> (
+    ResolutionResult<&'a Requirement, &'a Candidate, &'a str>,
+    Vec<Operation<'a>>,
+) {
+    let (result, operations) = try_resolve_and_report(reqs, pkgs);
+    (result.unwrap(), operations)
+}
+
+fn try_resolve<'a>(
+    reqs: &'a [Requirement],
+    pkgs: &'a [Candidate],
+) -> Result<
+    ResolutionResult<&'a Requirement, &'a Candidate, &'a str>,
+    ResolutionError<&'a Requirement, &'a Candidate>,
+> {
+    let (result, _) = try_resolve_and_report(reqs, pkgs);
+    result
+}
+
+fn try_resolve_and_report<'a>(
+    reqs: &'a [Requirement],
+    pkgs: &'a [Candidate],
+) -> (
+    Result<
+        ResolutionResult<&'a Requirement, &'a Candidate, &'a str>,
+        ResolutionError<&'a Requirement, &'a Candidate>,
+    >,
+    Vec<Operation<'a>>,
+) {
+    let p = InMemoryProvider::from_candidates(pkgs);
+    let r = TrackingReporter::new();
+    let resolver = Resolver::new(p, &r);
     let result = resolver.resolve(reqs.iter().collect());
-    result.unwrap()
+    (result, r.operations.into_inner())
 }
 
 #[test]
 fn resolve_empty() {
-    let p = InMemoryProvider::default();
-    let resolver = Resolver::new(p);
-    let result = resolver.resolve(Vec::new()).unwrap();
+    let (result, ops) = resolve(&[], &[]);
 
+    assert_eq!(ops.len(), 0);
     assert_eq!(result.mapping.len(), 0);
     assert_eq!(result.criteria.len(), 0);
     assert_eq!(result.graph.node_count(), 1);
@@ -218,24 +266,20 @@ fn resolve_empty() {
 
 #[test]
 fn resolve_single() -> anyhow::Result<()> {
-    // What the user wants to install
-    let req = req("python", 5..10);
+    let reqs = vec![req("python", 5..10)];
+    let pkgs = vec![pkg("python", 9, vec![]), pkg("python", 10, vec![])];
 
-    // Available packages
-    let p1 = pkg("python", 9, vec![]);
-    let p2 = pkg("python", 10, vec![]);
+    let (result, ops) = resolve(&reqs, &pkgs);
 
-    // Register them in the provider
-    let mut p = InMemoryProvider::default();
-    p.register_requirement(&req);
-    p.register_candidate(&p1);
-    p.register_candidate(&p2);
+    // Operations
+    check_ops(
+        &ops,
+        r"
+        pin python=9
+    ",
+    );
 
-    // Resolve!
-    let resolver = Resolver::new(p);
-    let result = resolver.resolve(vec![&req]).unwrap();
-
-    // Assert
+    // Outcome
     assert_eq!(result.mapping.len(), 1);
 
     let found_candidate = result.mapping["python"];
@@ -247,13 +291,8 @@ fn resolve_single() -> anyhow::Result<()> {
 
 #[test]
 fn resolve_non_existent() {
-    let req = req("python", 0..10);
-
-    let mut p = InMemoryProvider::default();
-    p.register_requirement(&req);
-
-    let resolver = Resolver::new(p);
-    let result = resolver.resolve(vec![&req]);
+    let reqs = vec![req("python", 0..10)];
+    let result = try_resolve(&reqs, &[]);
 
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -270,15 +309,9 @@ fn resolve_non_existent() {
 
 #[test]
 fn resolve_unsatisfiable_root() {
-    let req = req("python", 0..10);
-    let package = pkg("python", 42, vec![]);
-
-    let mut p = InMemoryProvider::default();
-    p.register_requirement(&req);
-    p.register_candidate(&package);
-
-    let resolver = Resolver::new(p);
-    let result = resolver.resolve(vec![&req]);
+    let reqs = vec![req("python", 0..10)];
+    let pkgs = vec![pkg("python", 42, vec![])];
+    let result = try_resolve(&reqs, &pkgs);
 
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -295,22 +328,17 @@ fn resolve_unsatisfiable_root() {
 
 #[test]
 fn resolve_unsatisfiable_dep() {
-    let package = pkg("python", 8, vec![req("foo", 2..4)]);
-    let req = req("python", 0..10);
+    let reqs = vec![req("python", 0..10)];
+    let pkgs = vec![pkg("python", 8, vec![req("foo", 2..4)])];
+    let (result, ops) = try_resolve_and_report(&reqs, &pkgs);
 
-    let mut p = InMemoryProvider::default();
-    p.register_requirement(&req);
-    p.register_candidate(&package);
-
-    let resolver = Resolver::new(p);
-    let result = resolver.resolve(vec![&req]);
-
+    assert_eq!(ops.len(), 0);
     assert!(result.is_err());
     let err = result.err().unwrap();
 
     if let ResolutionError::ResolutionImpossible(candidates) = err {
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].parent.unwrap(), &package);
+        assert_eq!(candidates[0].parent.unwrap(), &pkgs[0]);
         assert_eq!(candidates[0].requirement.package_name, "foo");
         assert_eq!(candidates[0].requirement.specifier, 2..4);
     } else {
@@ -322,7 +350,7 @@ fn resolve_unsatisfiable_dep() {
 fn resolve_complex() {
     let reqs = vec![req("python", 0..10), req("some-lib", 12..15)];
 
-    let packages = vec![
+    let pkgs = vec![
         // Available versions of python
         pkg("python", 6, vec![req("foo", 2..3)]),
         pkg("python", 8, vec![req("foo", 2..4)]),
@@ -334,10 +362,12 @@ fn resolve_complex() {
         pkg("some-lib", 15, vec![req("python", 8..10)]),
     ];
 
-    let p = InMemoryProvider::from_requirements_and_candidates(&reqs, &packages);
-    let resolver = Resolver::new(p);
-    let result = resolver.resolve(reqs.iter().collect());
-    let result = result.unwrap();
+    let (result, ops) = resolve(&reqs, &pkgs);
+    check_ops(&ops, r"
+        pin some-lib=12
+        pin python=6
+        pin foo=2
+    ");
 
     assert_eq!(result.mapping.len(), 3);
     assert_eq!(result.criteria.len(), 3);
@@ -385,7 +415,7 @@ fn resolve_with_inactive_constraints() {
     ];
 
     // Package C is not required, so it won't be resolved
-    let result = resolve(&reqs, &pkgs);
+    let (result, _) = resolve(&reqs, &pkgs);
     assert_eq!(result.mapping["A"].version, 5);
     assert_eq!(result.mapping["B"].version, 2);
     assert!(!result.mapping.contains_key("C"));
@@ -403,7 +433,7 @@ fn resolve_with_active_constraints() {
     ];
 
     // Package C is required, so it will be constrained to 0..10
-    let result = resolve(&reqs, &pkgs);
+    let (result, _) = resolve(&reqs, &pkgs);
     assert_eq!(result.mapping["A"].version, 5);
     assert_eq!(result.mapping["B"].version, 2);
     assert_eq!(result.mapping["C"].version, 9);
@@ -439,9 +469,51 @@ fn resolve_backtrack() {
         pkg("E", 8, vec![]),
     ];
 
-    let solution = resolve(&reqs, &packages);
+    let (solution, ops) = resolve(&reqs, &packages);
+
+    // Operations
+    check_ops(
+        &ops,
+        r"
+        pin A=6
+        pin B=9
+        pin E=9
+        backtrack 2
+        pin B=8
+        pin E=8
+        pin C=9
+    ",
+    );
+
+    // Solution
     assert_eq!(solution.mapping["A"].version, 6);
     assert_eq!(solution.mapping["B"].version, 8);
     assert_eq!(solution.mapping["C"].version, 9);
     assert_eq!(solution.mapping["E"].version, 8);
+}
+
+fn check_ops(ops: &[Operation], expected: &str) {
+    let expected: Vec<_> = expected
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    for (op, &line) in ops.into_iter().zip(&expected) {
+        let op_str = op.to_string();
+        assert_eq!(op_str, line);
+    }
+
+    if expected.len() > ops.len() {
+        panic!(
+            "Expected {}, but found {} actual operations!",
+            expected.len(),
+            ops.len()
+        );
+    } else if expected.len() < ops.len() {
+        panic!(
+            "Operations match, but there are {} more actual operations. The next one is {}",
+            ops.len() - expected.len(),
+            ops[expected.len()].to_string()
+        );
+    }
 }
