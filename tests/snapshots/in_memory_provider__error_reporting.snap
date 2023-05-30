@@ -1,0 +1,14 @@
+---
+source: tests/in_memory_provider.rs
+assertion_line: 569
+expression: error
+---
+The following packages are incompatible
+|-- icons 100..101 is installable;
+|-- intl 500..501 is installable;
+|-- menu 0..999 is non-installable because there are no viable options
+    |-- menu 150 would require
+       |-- dropdown 200..231, which conflicts with any installable versions previously reported.
+    |-- menu 100 would require
+       |-- dropdown 180..200, which conflicts with any installable versions previously reported.
+

@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use resolvelib_rs::{Provider, Reporter, ResolutionError, ResolutionResult, Resolver};
+use resolvelib_rs::{
+    FindMatchesError, Provider, Reporter, ResolutionError, ResolutionResult, Resolver,
+};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Candidate {
@@ -130,14 +132,14 @@ impl<'a> Provider for InMemoryProvider<'a> {
         identifier: Self::Identifier,
         requirements: &HashMap<Self::Identifier, Vec<Self::Requirement>>,
         incompatibilities: &HashMap<Self::Identifier, Vec<Self::Candidate>>,
-    ) -> Vec<Self::Candidate> {
+    ) -> Result<Vec<Self::Candidate>, FindMatchesError> {
         // Find all possible candidates that satisfy the given constraints
         let requirements = &requirements[&identifier];
 
         // For each requirement, derive candidates
         let mut all_candidates = HashSet::new();
-        let mut first_requirement = true;
-        for requirement in requirements {
+
+        for (i, requirement) in requirements.into_iter().enumerate() {
             let incompatibilities = &incompatibilities[requirement.package_name.as_str()];
             let incompatible_versions: HashSet<_> =
                 incompatibilities.iter().map(|i| i.version).collect();
@@ -155,40 +157,26 @@ impl<'a> Provider for InMemoryProvider<'a> {
                 .cloned()
                 .collect();
 
-            if first_requirement {
+            if i == 0 {
                 all_candidates = new_candidates;
+                if all_candidates.is_empty() {
+                    assert_eq!(requirements.len(), 1);
+                    return Err(FindMatchesError::NotFound);
+                }
             } else {
                 all_candidates.retain(|c| new_candidates.contains(c));
             }
-
-            first_requirement = false;
         }
 
         let mut all_candidates: Vec<_> = all_candidates.into_iter().collect();
         all_candidates.sort_by(|c1, c2| c2.version.cmp(&c1.version));
 
-        println!("find_matches for {identifier}");
-        println!("requirements:");
-        for requirement in requirements {
-            println!(
-                " {} {}..{}",
-                requirement.package_name, requirement.specifier.start, requirement.specifier.end
-            );
+        if all_candidates.is_empty() {
+            // The original requirement had candidates, but later requirements conflicted with them
+            Err(FindMatchesError::Conflict)
+        } else {
+            Ok(all_candidates)
         }
-        println!("candidates:");
-        for candidate in &all_candidates {
-            println!(" {} {}", candidate.package_name, candidate.version)
-        }
-
-        let incompatibilities = &incompatibilities[&identifier];
-        if !incompatibilities.is_empty() {
-            println!("incompatible:");
-            for candidate in incompatibilities {
-                println!(" {} {}", candidate.package_name, candidate.version);
-            }
-        }
-
-        all_candidates
     }
 
     fn is_satisfied_by(&self, requirement: Self::Requirement, candidate: Self::Candidate) -> bool {
@@ -223,7 +211,7 @@ fn resolve<'a>(
     Vec<Operation<'a>>,
 ) {
     let (result, operations) = try_resolve_and_report(reqs, pkgs);
-    (result.unwrap(), operations)
+    (result.ok().unwrap(), operations)
 }
 
 fn try_resolve<'a>(
@@ -496,6 +484,59 @@ fn resolve_backtrack() {
     assert_eq!(solution.mapping["B"].version, 8);
     assert_eq!(solution.mapping["C"].version, 9);
     assert_eq!(solution.mapping["E"].version, 8);
+}
+
+#[test]
+fn error_reporting_root_conflict() {
+    let pkgs = vec![pkg("A", 2, vec![]), pkg("A", 5, vec![])];
+
+    let reqs = vec![req("A", 0..4), req("A", 5..10)];
+
+    let result = try_resolve(&reqs, &pkgs);
+    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
+        let error = err.graph().print_user_friendly_error(
+            |c| format!("{} {}", c.package_name, c.version),
+            |r| format!("{} {:?}", r.package_name, r.specifier)
+        );
+        insta::assert_display_snapshot!(error);
+    } else {
+        panic!("Unexpected result")
+    }
+}
+
+#[test]
+fn error_reporting() {
+    // Taken from the pubgrub article: https://nex3.medium.com/pubgrub-2fb6470504f
+    let pkgs = vec![
+        pkg("menu", 150, vec![req("dropdown", 200..231)]),
+        pkg("menu", 100, vec![req("dropdown", 180..200)]),
+        pkg("dropdown", 230, vec![req("icons", 200..201)]),
+        pkg("dropdown", 180, vec![req("intl", 300..301)]),
+        pkg("icons", 200, vec![]),
+        pkg("icons", 100, vec![]),
+        pkg("intl", 500, vec![]),
+        pkg("intl", 300, vec![]),
+    ];
+
+    let reqs = vec![
+        req("menu", 0..999),
+        req("icons", 100..101),
+        req("intl", 500..501),
+    ];
+
+    let resolve = try_resolve(&reqs, &pkgs);
+    assert!(resolve.is_err());
+
+    let error = resolve.err().unwrap_or_else(|| panic!("expected error!"));
+    if let ResolutionError::ResolutionImpossible(err) = error {
+        let error = err.graph().print_user_friendly_error(
+            |c| format!("{} {}", c.package_name, c.version),
+            |r| format!("{} {:?}", r.package_name, r.specifier),
+        );
+        insta::assert_display_snapshot!(error);
+    } else {
+        panic!("Unexpected error");
+    }
 }
 
 fn check_ops(ops: &[Operation], expected: &str) {

@@ -10,3 +10,7 @@ anyhow = "1.0.71"
 petgraph = "0.6.3"
 rustc-hash = "1.1.0"
 thiserror = "1.0.40"
+itertools = "0.10.5"
+
+[dev-dependencies]
+insta = "1.29.0"

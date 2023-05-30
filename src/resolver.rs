@@ -2,10 +2,11 @@ use petgraph::graphmap::DiGraphMap;
 use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use thiserror::Error;
 
+use crate::error::{ResolutionError, ResolutionImpossible};
+use crate::explored_space::{ExploredSpace, Node};
 use crate::provider::Provider;
-use crate::Reporter;
+use crate::{FindMatchesError, Reporter};
 
 pub struct ResolutionResult<TRequirement, TCandidate, TIdentifier> {
     pub mapping: HashMap<TIdentifier, TCandidate>,
@@ -41,25 +42,6 @@ where
 
     fn iter_parent(&self) -> impl Iterator<Item = Option<TCandidate>> + '_ {
         self.information.iter().map(|i| i.parent)
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum ResolutionError<TRequirement, TCandidate> {
-    #[error("resolution impossible")]
-    ResolutionImpossible(ResolutionImpossible<TRequirement, TCandidate>),
-    #[error("resolution too deep")]
-    ResolutionTooDeep(u64),
-}
-
-#[derive(Debug)]
-pub struct ResolutionImpossible<TRequirement, TCandidate> {
-    unsatisfied: Vec<RequirementInformation<TRequirement, TCandidate>>,
-}
-
-impl<TRequirement, TCandidate> ResolutionImpossible<TRequirement, TCandidate> {
-    pub fn unsatisfied_requirements(&self) -> &[RequirementInformation<TRequirement, TCandidate>] {
-        &self.unsatisfied
     }
 }
 
@@ -158,14 +140,15 @@ where
 struct Resolution<'a, P: Provider, R: Reporter> {
     state: ResolutionState<P::Requirement, P::Candidate, P::Identifier>,
     states: Vec<ResolutionState<P::Requirement, P::Candidate, P::Identifier>>,
+    graph: ExploredSpace<P::Requirement, P::Candidate>,
     provider: &'a P,
     reporter: &'a R,
 }
 
 impl<'a, P: Provider, R> Resolution<'a, P, R>
 where
-    P::Requirement: Copy,
-    P::Candidate: Copy,
+    P::Requirement: Copy + Hash + Eq,
+    P::Candidate: Copy + Hash + Eq,
     P::Identifier: Copy + Hash + Eq,
     R: Reporter<Requirement = P::Requirement, Candidate = P::Candidate, Identifier = P::Identifier>,
 {
@@ -179,6 +162,7 @@ where
                 pinned_candidate_stack: Vec::new(),
             },
             states: Vec::new(),
+            graph: ExploredSpace::new(),
             provider,
             reporter,
         }
@@ -192,25 +176,28 @@ where
         ResolutionState<P::Requirement, P::Candidate, P::Identifier>,
         ResolutionError<P::Requirement, P::Candidate>,
     > {
-        // Initialize the root state
         self.reporter.starting();
+
+        // Initialize the root state
         for r in requirements {
             let req_info = RequirementInformation {
                 requirement: r,
                 parent: None,
                 kind: RequirementKind::Dependency,
             };
-            Resolution::create_or_update_criterion(
+            let update_result = Resolution::create_or_update_criterion(
                 self.provider,
                 self.reporter,
+                &mut self.graph,
                 &mut self.state.criteria,
                 req_info,
-            )
-            .map_err(|criterion| {
-                ResolutionError::ResolutionImpossible(ResolutionImpossible {
-                    unsatisfied: criterion.information,
-                })
-            })?;
+            );
+
+            if let Err(criterion) = update_result {
+                return Err(ResolutionError::ResolutionImpossible(
+                    ResolutionImpossible::new(self.graph, criterion.information),
+                ));
+            }
         }
 
         // The root state is saved as a sentinel so the first ever pin can have
@@ -277,9 +264,7 @@ where
 
                 if !success {
                     return Err(ResolutionError::ResolutionImpossible(
-                        ResolutionImpossible {
-                            unsatisfied: self.state.backtrack_causes.clone(),
-                        },
+                        ResolutionImpossible::new(self.graph, self.state.backtrack_causes.clone()),
                     ));
                 }
             } else {
@@ -335,6 +320,7 @@ where
     fn create_or_update_criterion(
         provider: &P,
         reporter: &R,
+        graph: &mut ExploredSpace<P::Requirement, P::Candidate>,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         req_info: RequirementInformation<P::Requirement, P::Candidate>,
     ) -> Result<(), Criterion<P::Requirement, P::Candidate>> {
@@ -360,20 +346,40 @@ where
             .entry(identifier)
             .or_insert(Vec::new());
 
-        let candidates =
-            provider.find_matches(identifier, &all_requirements, &all_incompatibilities);
-
         // Update the criterion in the map, with the new req_info and candidates
         let criterion = criteria.entry(identifier).or_insert(Criterion::default());
-        criterion.candidates = candidates;
-        criterion.information.push(req_info);
+        criterion.information.push(req_info.clone());
 
-        if criterion.candidates.is_empty() {
-            Err(criterion.clone())
-        } else {
-            Ok(())
+        let parent = req_info.parent.map_or(Node::Root, Node::Candidate);
+        let parent = graph.get_or_add_node(parent);
+        match provider.find_matches(identifier, &all_requirements, &all_incompatibilities) {
+            Ok(candidates) => {
+                // Track candidates reached from this node
+                for &candidate in &candidates {
+                    let child = graph.get_or_add_node(Node::Candidate(candidate));
+                    graph.track_requirement(parent, child, req_info.requirement, req_info.kind);
+                }
+
+                criterion.candidates = candidates;
+                Ok(())
+            }
+            Err(FindMatchesError::Conflict) => {
+                for &candidate in &criterion.candidates {
+                    let child = graph.get_or_add_node(Node::Candidate(candidate));
+                    graph.track_conflict(parent, child, req_info.requirement, req_info.kind);
+                }
+
+                criterion.candidates.clear();
+                Err(criterion.clone())
+            }
+            Err(FindMatchesError::NotFound) => {
+                graph.track_missing(parent, req_info.requirement, req_info.kind);
+                criterion.candidates.clear();
+                Err(criterion.clone())
+            }
         }
     }
+
     /// Push a new state into history
     ///
     /// This new state will be used to hold resolution results of the next coming round
@@ -424,6 +430,7 @@ where
             let result = Resolution::update_constraints(
                 self.provider,
                 self.reporter,
+                &mut self.graph,
                 &mut updated_criteria,
                 &mut updated_constraints,
                 candidate,
@@ -437,6 +444,7 @@ where
             let result = Resolution::update_requirements(
                 self.provider,
                 self.reporter,
+                &mut self.graph,
                 &mut updated_criteria,
                 &updated_constraints,
                 candidate,
@@ -489,6 +497,7 @@ where
     fn update_requirements(
         provider: &P,
         reporter: &R,
+        graph: &mut ExploredSpace<P::Requirement, P::Candidate>,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         constraints: &HashMap<
             P::Identifier,
@@ -506,6 +515,7 @@ where
                         Resolution::create_or_update_criterion(
                             provider,
                             reporter,
+                            graph,
                             criteria,
                             constraint.clone(),
                         )?;
@@ -520,7 +530,7 @@ where
             };
 
             // Update the criterion
-            Resolution::create_or_update_criterion(provider, reporter, criteria, req_info)?;
+            Resolution::create_or_update_criterion(provider, reporter, graph, criteria, req_info)?;
         }
 
         Ok(())
@@ -534,6 +544,7 @@ where
     fn update_constraints(
         provider: &P,
         reporter: &R,
+        graph: &mut ExploredSpace<P::Requirement, P::Candidate>,
         criteria: &mut HashMap<P::Identifier, Criterion<P::Requirement, P::Candidate>>,
         constraints: &mut HashMap<
             P::Identifier,
@@ -557,7 +568,9 @@ where
 
             // Update the constraint's criterion, if it exists
             if criteria.contains_key(&identifier) {
-                Resolution::create_or_update_criterion(provider, reporter, criteria, req_info)?;
+                Resolution::create_or_update_criterion(
+                    provider, reporter, graph, criteria, req_info,
+                )?;
             }
         }
 
@@ -635,9 +648,7 @@ where
 
                 // Unable to backtrack anymore
                 return Err(ResolutionError::ResolutionImpossible(
-                    ResolutionImpossible {
-                        unsatisfied: causes.to_vec(),
-                    },
+                    ResolutionImpossible::new(self.graph.clone(), causes.to_vec()),
                 ));
             };
 
@@ -698,12 +709,14 @@ where
                 .or_insert(Vec::new())
                 .extend(incompatibilities);
 
-            let candidates = self
-                .provider
-                .find_matches(k, &requirements, &all_incompatibilities);
-            if candidates.is_empty() {
-                return false;
-            }
+            let candidates =
+                match self
+                    .provider
+                    .find_matches(k, &requirements, &all_incompatibilities)
+                {
+                    Err(_) => return false,
+                    Ok(candidates) => candidates,
+                };
 
             let incompatibilities = incompatibilities
                 .iter()
@@ -729,8 +742,8 @@ pub struct Resolver<'a, P: Provider, R: Reporter> {
 
 impl<'a, P: Provider, R: Reporter> Resolver<'a, P, R>
 where
-    P::Requirement: Copy,
-    P::Candidate: Copy,
+    P::Requirement: Copy + Hash + Eq,
+    P::Candidate: Copy + Hash + Eq,
     P::Identifier: Copy + Hash + Eq + Ord,
     R: Reporter<Candidate = P::Candidate, Requirement = P::Requirement, Identifier = P::Identifier>,
 {
@@ -762,14 +775,14 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct RequirementInformation<TRequirement, TCandidate> {
     pub requirement: TRequirement,
     pub parent: Option<TCandidate>,
     pub kind: RequirementKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RequirementKind {
     Dependency,
     Constraint,

@@ -1,6 +1,6 @@
-use std::marker::PhantomData;
 use crate::resolver::ResolutionState;
 use crate::RequirementInformation;
+use std::marker::PhantomData;
 
 pub trait Reporter {
     type Requirement;
@@ -43,19 +43,14 @@ pub trait Reporter {
     fn pinning(&self, _candidate: Self::Candidate) {}
 }
 
+#[derive(Default)]
 pub struct NoOpReporter<TRequirement, TCandidate, TIdentifier> {
     phantom: PhantomData<(TRequirement, TCandidate, TIdentifier)>,
 }
 
-impl<TRequirement, TCandidate, TIdentifier> NoOpReporter<TRequirement, TCandidate, TIdentifier> {
-    pub fn new() -> Self {
-        Self {
-            phantom: PhantomData::default()
-        }
-    }
-}
-
-impl<TRequirement, TCandidate, TIdentifier> Reporter for NoOpReporter<TRequirement, TCandidate, TIdentifier> {
+impl<TRequirement, TCandidate, TIdentifier> Reporter
+    for NoOpReporter<TRequirement, TCandidate, TIdentifier>
+{
     type Requirement = TRequirement;
     type Candidate = TCandidate;
     type Identifier = TIdentifier;
