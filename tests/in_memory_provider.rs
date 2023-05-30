@@ -2,9 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use resolvelib_rs::{
-    FindMatchesError, Provider, Reporter, ResolutionError, ResolutionResult, Resolver,
-};
+use resolvelib_rs::{Provider, Reporter, ResolutionError, ResolutionResult, Resolver};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Candidate {
@@ -132,7 +130,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
         identifier: Self::Identifier,
         requirements: &HashMap<Self::Identifier, Vec<Self::Requirement>>,
         incompatibilities: &HashMap<Self::Identifier, Vec<Self::Candidate>>,
-    ) -> Result<Vec<Self::Candidate>, FindMatchesError> {
+    ) -> Vec<Self::Candidate> {
         // Find all possible candidates that satisfy the given constraints
         let requirements = &requirements[&identifier];
 
@@ -161,7 +159,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
                 all_candidates = new_candidates;
                 if all_candidates.is_empty() {
                     assert_eq!(requirements.len(), 1);
-                    return Err(FindMatchesError::NotFound);
+                    break;
                 }
             } else {
                 all_candidates.retain(|c| new_candidates.contains(c));
@@ -170,13 +168,7 @@ impl<'a> Provider for InMemoryProvider<'a> {
 
         let mut all_candidates: Vec<_> = all_candidates.into_iter().collect();
         all_candidates.sort_by(|c1, c2| c2.version.cmp(&c1.version));
-
-        if all_candidates.is_empty() {
-            // The original requirement had candidates, but later requirements conflicted with them
-            Err(FindMatchesError::Conflict)
-        } else {
-            Ok(all_candidates)
-        }
+        all_candidates
     }
 
     fn is_satisfied_by(&self, requirement: Self::Requirement, candidate: Self::Candidate) -> bool {

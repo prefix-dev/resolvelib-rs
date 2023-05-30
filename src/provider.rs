@@ -3,13 +3,6 @@ use std::hash::Hash;
 
 use crate::resolver::{Criterion, RequirementInformation};
 
-pub enum FindMatchesError {
-    /// Multiple requirements were provided, and they conflicted with each other
-    Conflict,
-    /// A single requirement was provided, yet there were no candidates for it
-    NotFound,
-}
-
 pub trait Provider {
     type Candidate: Copy;
     type Requirement: Copy;
@@ -53,7 +46,7 @@ pub trait Provider {
         identifier: Self::Identifier,
         requirements: &HashMap<Self::Identifier, Vec<Self::Requirement>>,
         incompatibilities: &HashMap<Self::Identifier, Vec<Self::Candidate>>,
-    ) -> Result<Vec<Self::Candidate>, FindMatchesError>;
+    ) -> Vec<Self::Candidate>;
 
     /// Whether the candidate satisfies the requirement
     fn is_satisfied_by(&self, requirement: Self::Requirement, candidate: Self::Candidate) -> bool;

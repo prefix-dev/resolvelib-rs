@@ -6,7 +6,7 @@ use std::hash::Hash;
 use crate::error::{ResolutionError, ResolutionImpossible};
 use crate::explored_space::{ExploredSpace, Node};
 use crate::provider::Provider;
-use crate::{FindMatchesError, Reporter};
+use crate::Reporter;
 
 pub struct ResolutionResult<TRequirement, TCandidate, TIdentifier> {
     pub mapping: HashMap<TIdentifier, TCandidate>,
@@ -348,35 +348,38 @@ where
 
         // Update the criterion in the map, with the new req_info and candidates
         let criterion = criteria.entry(identifier).or_insert(Criterion::default());
+        let original_req_count = criterion.information.len();
         criterion.information.push(req_info.clone());
 
         let parent = req_info.parent.map_or(Node::Root, Node::Candidate);
         let parent = graph.get_or_add_node(parent);
-        match provider.find_matches(identifier, &all_requirements, &all_incompatibilities) {
-            Ok(candidates) => {
-                // Track candidates reached from this node
-                for &candidate in &candidates {
-                    let child = graph.get_or_add_node(Node::Candidate(candidate));
-                    graph.track_requirement(parent, child, req_info.requirement, req_info.kind);
-                }
-
-                criterion.candidates = candidates;
-                Ok(())
-            }
-            Err(FindMatchesError::Conflict) => {
+        let candidates =
+            provider.find_matches(identifier, &all_requirements, &all_incompatibilities);
+        if candidates.is_empty() {
+            if original_req_count != 0 {
+                // The criterion used to have candidates, but after adding a new requirement there are
+                // no candidates anymore. This means we have reached a conflict.
                 for &candidate in &criterion.candidates {
                     let child = graph.get_or_add_node(Node::Candidate(candidate));
                     graph.track_conflict(parent, child, req_info.requirement, req_info.kind);
                 }
-
-                criterion.candidates.clear();
-                Err(criterion.clone())
-            }
-            Err(FindMatchesError::NotFound) => {
+            } else if original_req_count == 0 {
+                // This is the first requirement we add to the criterion, and it yields no candidates,
+                // which means the dependency is missing
                 graph.track_missing(parent, req_info.requirement, req_info.kind);
-                criterion.candidates.clear();
-                Err(criterion.clone())
             }
+
+            criterion.candidates.clear();
+            Err(criterion.clone())
+        } else {
+            // Track candidates reached from this node
+            for &candidate in &candidates {
+                let child = graph.get_or_add_node(Node::Candidate(candidate));
+                graph.track_requirement(parent, child, req_info.requirement, req_info.kind);
+            }
+
+            criterion.candidates = candidates;
+            Ok(())
         }
     }
 
@@ -709,14 +712,13 @@ where
                 .or_insert(Vec::new())
                 .extend(incompatibilities);
 
-            let candidates =
-                match self
-                    .provider
-                    .find_matches(k, &requirements, &all_incompatibilities)
-                {
-                    Err(_) => return false,
-                    Ok(candidates) => candidates,
-                };
+            let candidates = self
+                .provider
+                .find_matches(k, &requirements, &all_incompatibilities);
+
+            if candidates.is_empty() {
+                return false;
+            }
 
             let incompatibilities = incompatibilities
                 .iter()
