@@ -496,7 +496,7 @@ fn error_reporting_root_conflict() {
     if let Err(ResolutionError::ResolutionImpossible(err)) = result {
         let error = err.graph().print_user_friendly_error(
             |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier)
+            |r| format!("{} {:?}", r.package_name, r.specifier),
         );
         insta::assert_display_snapshot!(error);
     } else {

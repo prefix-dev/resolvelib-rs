@@ -43,9 +43,18 @@ pub trait Reporter {
     fn pinning(&self, _candidate: Self::Candidate) {}
 }
 
-#[derive(Default)]
 pub struct NoOpReporter<TRequirement, TCandidate, TIdentifier> {
     phantom: PhantomData<(TRequirement, TCandidate, TIdentifier)>,
+}
+
+impl<TRequirement, TCandidate, TIdentifier> Default
+    for NoOpReporter<TRequirement, TCandidate, TIdentifier>
+{
+    fn default() -> Self {
+        Self {
+            phantom: PhantomData::default(),
+        }
+    }
 }
 
 impl<TRequirement, TCandidate, TIdentifier> Reporter
