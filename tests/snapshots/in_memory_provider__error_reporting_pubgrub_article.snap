@@ -1,6 +1,5 @@
 ---
 source: tests/in_memory_provider.rs
-assertion_line: 569
 expression: error
 ---
 The following packages are incompatible

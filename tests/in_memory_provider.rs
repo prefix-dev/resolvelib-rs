@@ -497,7 +497,7 @@ fn error_reporting_root_conflict() {
 }
 
 #[test]
-fn error_reporting() {
+fn error_reporting_pubgrub_article() {
     // Taken from the pubgrub article: https://nex3.medium.com/pubgrub-2fb6470504f
     let pkgs = vec![
         pkg("menu", 150, vec![req("dropdown", 200..231)]),

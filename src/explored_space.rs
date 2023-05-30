@@ -1,7 +1,7 @@
 use crate::RequirementKind;
 
 use itertools::Itertools;
-use petgraph::graph::{DiGraph, EdgeIndex, EdgeReference, NodeIndex};
+use petgraph::graph::{DiGraph, EdgeReference, NodeIndex};
 use petgraph::prelude::{Bfs, EdgeRef};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
@@ -223,75 +223,7 @@ where
         display_candidate: impl Fn(TCandidate) -> String,
         display_requirement: impl Fn(TRequirement) -> String,
     ) -> DisplayError {
-        // ---
-        // Step 1: Propagate conflict information up the graph, storing the resulting info in
-        // `edges_with_conflicts`
-        // ---
-        let mut edges_with_conflicts = FxHashMap::default();
-
-        enum Op<T> {
-            CheckPackage(T),
-            DetectConflicts(T),
-        }
-
-        let missing = self.node_ids.get(&Node::NotFound).cloned();
         let root_node = self.node_ids[&Node::Root];
-        let mut stack = self
-            .graph
-            .edges(root_node)
-            .map(Op::CheckPackage)
-            .collect::<Vec<_>>();
-
-        while let Some(op) = stack.pop() {
-            match op {
-                Op::CheckPackage(edge) => {
-                    // Schedule a DetectConflicts step after the dependencies have been checked
-                    stack.push(Op::DetectConflicts(edge));
-
-                    // Check this package's dependencies
-                    let node = edge.target();
-                    for edge in self.graph.edges(node) {
-                        let requirement = edge.weight();
-                        let child_id = edge.target();
-
-                        if requirement.status == EdgeStatus::Conflict || Some(child_id) == missing {
-                            // Reached a conflict, no need to recurse further down this path
-                            edges_with_conflicts.insert(edge.id(), edge);
-                        } else {
-                            // No conflict found yet, check the dependencies
-                            stack.extend(self.graph.edges(node).map(Op::CheckPackage));
-                        }
-                    }
-                }
-                Op::DetectConflicts(edge) => {
-                    let node = edge.target();
-                    let grouped_edges =
-                        self.graph.edges(node).group_by(|e| &e.weight().requirement);
-                    for (_, mut group) in &grouped_edges {
-                        // If no edges are installable, then the package is not installable
-                        if group.all(|edge| edges_with_conflicts.contains_key(&edge.id())) {
-                            edges_with_conflicts.insert(edge.id(), edge);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Don't forget to add the root edges themselves, if they are conflicting
-        edges_with_conflicts.extend(
-            self.graph
-                .edges(root_node)
-                .filter(|e| e.weight().status == EdgeStatus::Conflict)
-                .map(|edge| (edge.id(), edge)),
-        );
-
-        if edges_with_conflicts.is_empty() {
-            panic!("No errors!");
-        }
-
-        // ---
-        // Step 2: collect the results in a tree for easy formatting
-        // ---
         let mut error = DisplayError {
             root_requirements: Vec::new(),
         };
@@ -302,7 +234,6 @@ where
 
         for (requirement, candidates) in top_level_edges.into_iter() {
             let req = self.get_display_requirement(
-                &|edge| edges_with_conflicts.contains_key(&edge),
                 &display_candidate,
                 &display_requirement,
                 display_requirement(requirement),
@@ -316,7 +247,6 @@ where
 
     fn get_display_requirement(
         &self,
-        has_conflict: &impl Fn(EdgeIndex) -> bool,
         display_candidate: &impl Fn(TCandidate) -> String,
         display_requirement: &impl Fn(TRequirement) -> String,
         name: String,
@@ -326,7 +256,6 @@ where
             .into_iter()
             .flat_map(|edge| {
                 self.get_display_candidate(
-                    has_conflict,
                     display_candidate,
                     display_requirement,
                     edge,
@@ -341,7 +270,6 @@ where
 
     fn get_display_candidate(
         &self,
-        has_conflict: &impl Fn(EdgeIndex) -> bool,
         display_candidate: &impl Fn(TCandidate) -> String,
         display_requirement: &impl Fn(TRequirement) -> String,
         edge_to_candidate: EdgeReference<Edge<TRequirement>>,
@@ -356,7 +284,6 @@ where
                 let mut reqs = Vec::new();
                 for (requirement, edges) in candidate_dependencies.into_iter() {
                     reqs.push(self.get_display_requirement(
-                        has_conflict,
                         display_candidate,
                         display_requirement,
                         display_requirement(requirement),
@@ -366,7 +293,7 @@ where
 
                 Some(DisplayCandidate {
                     name: display_candidate(c.clone()),
-                    installable: !has_conflict(edge_to_candidate.id()),
+                    installable: edge_to_candidate.weight().status == EdgeStatus::Healthy && reqs.iter().all(|r| r.installable),
                     requirements: reqs,
                 })
             }
