@@ -138,7 +138,11 @@ impl std::fmt::Display for DisplayError {
                     }
                 }
                 DisplayOp::Candidate(candidate) => {
-                    writeln!(f, "{indent}|-- {} would require", candidate.name)?;
+                    if candidate.requirements.is_empty() {
+                        writeln!(f, "{indent}|-- {}", candidate.name)?;
+                    } else {
+                        writeln!(f, "{indent}|-- {} would require", candidate.name)?;
+                    }
                     stack.extend(
                         candidate
                             .requirements
