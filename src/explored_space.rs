@@ -89,7 +89,7 @@ impl std::fmt::Display for DisplayError {
             .map(|r| (DisplayOp::Requirement(r), 0))
             .collect::<Vec<_>>();
         while let Some((node, depth)) = stack.pop() {
-            let indent = " ".repeat(depth * 3 + 1);
+            let indent = " ".repeat(depth * 4);
 
             match node {
                 DisplayOp::Requirement(requirement) => {
@@ -97,7 +97,7 @@ impl std::fmt::Display for DisplayError {
                     let req = &requirement.name;
 
                     if requirement.candidates.is_empty() {
-                        stack.push((DisplayOp::NoCandidates(requirement), depth + 1));
+                        stack.push((DisplayOp::NoCandidates(requirement), depth));
                     } else if requirement.candidates.len() == 1 {
                         // This is a leaf in the graph
                         if installable {
@@ -149,7 +149,7 @@ impl std::fmt::Display for DisplayError {
                 DisplayOp::NoCandidates(requirement) => {
                     writeln!(
                         f,
-                        "{indent}|-- {}, for which no candidates where found",
+                        "{indent}|-- No candidates where found for {}.",
                         requirement.name
                     )?;
                 }

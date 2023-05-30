@@ -1,0 +1,8 @@
+---
+source: tests/in_memory_provider.rs
+expression: error
+---
+The following packages are incompatible
+|-- A 41..42 is installable;
+|-- No candidates where found for B 14..15.
+
