@@ -1,0 +1,10 @@
+---
+source: tests/in_memory_provider.rs
+expression: error
+---
+The following packages are incompatible
+|-- suitcase-utils 54..99 will be installed;
+|-- bluesky-widgets 0..99 cannot be installed because:
+    |-- bluesky-widgets 42 would require
+        |-- suitcase-utils 0..54, which conflicts with the already selected version.
+

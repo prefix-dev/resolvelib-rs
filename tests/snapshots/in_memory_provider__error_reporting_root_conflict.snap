@@ -1,9 +1,8 @@
 ---
 source: tests/in_memory_provider.rs
-assertion_line: 505
 expression: error
 ---
 The following packages are incompatible
-|-- A 0..4 is installable;
-|-- A 5..10 is non-installable, because it conflicts with any installable versions previously reported.
+|-- A 0..4 will be installed;
+|-- A 5..10 cannot be installed, because it conflicts with the versions reported above.
 

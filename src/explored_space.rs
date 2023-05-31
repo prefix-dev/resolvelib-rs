@@ -48,15 +48,30 @@ enum EdgeStatus {
 
 pub struct DisplayRequirement {
     name: String,
-    candidates: Vec<DisplayCandidate>,
+    candidates: DisplayCandidates,
     installable: bool,
 }
 
+enum DisplayCandidates {
+    Candidates(Vec<DisplayCandidate>),
+    Conflict,
+    Missing,
+}
+
 impl DisplayRequirement {
-    fn new(name: String, candidates: Vec<DisplayCandidate>) -> Self {
+    fn new(name: String, candidates: DisplayCandidates) -> Self {
+        let installable = match &candidates {
+            DisplayCandidates::Candidates(candidates)
+                if candidates.iter().any(|c| c.installable) =>
+            {
+                true
+            }
+            _ => false,
+        };
+
         Self {
             name,
-            installable: candidates.iter().any(|c| c.installable),
+            installable,
             candidates,
         }
     }
@@ -77,7 +92,6 @@ impl std::fmt::Display for DisplayError {
         pub enum DisplayOp<'a> {
             Requirement(&'a DisplayRequirement),
             Candidate(&'a DisplayCandidate),
-            NoCandidates(&'a DisplayRequirement),
         }
 
         writeln!(f, "The following packages are incompatible")?;
@@ -96,53 +110,56 @@ impl std::fmt::Display for DisplayError {
                     let installable = requirement.installable;
                     let req = &requirement.name;
 
-                    if requirement.candidates.is_empty() {
-                        stack.push((DisplayOp::NoCandidates(requirement), depth));
-                    } else if requirement.candidates.len() == 1
-                        && requirement.candidates[0]
-                            .requirements
-                            .iter()
-                            .all(|r| r.installable)
-                    {
-                        // Treat this requirement as a leaf
-                        if installable {
-                            if depth == 0 {
-                                writeln!(f, "|-- {req} is installable;")?;
-                            } else {
-                                writeln!(f, "{indent}|-- {req}, which can be installed;")?;
-                            }
+                    if let DisplayCandidates::Missing = requirement.candidates {
+                        // No candidates for requirement
+                        if depth == 0 {
+                            writeln!(
+                                f,
+                                "{indent}|-- No candidates where found for {}.",
+                                requirement.name
+                            )?;
                         } else {
-                            if depth == 0 {
-                                writeln!(f, "|-- {req} is non-installable, because it conflicts with any installable versions previously reported.")?;
-                            } else {
-                                writeln!(f, "{indent}|-- {req}, which conflicts with any installable versions previously reported.")?;
-                            }
+                            writeln!(
+                                f,
+                                "{indent}|-- {}, for which no candidates where found.",
+                                requirement.name
+                            )?;
+                        }
+                    } else if installable {
+                        // Package can be installed (only mentioned for top-level requirements)
+                        if depth == 0 {
+                            writeln!(f, "|-- {req} will be installed;")?;
                         }
                     } else {
-                        // This node has children
-                        if depth == 0 {
-                            if installable {
-                                writeln!(f, "|-- {req} is installable with the potential options")?;
-                            } else {
-                                writeln!(f, "|-- {req} is non-installable because there are no viable options:")?;
-                            }
-                        } else {
-                            if installable {
-                                writeln!(f, "{indent}|-- {req}, which is installable with the potential options")?;
-                            } else {
-                                writeln!(
-                                    f,
-                                    "{indent}|-- {req}, for which there are no viable options:"
-                                )?;
-                            }
-                        }
+                        // Package cannot be installed
+                        match &requirement.candidates {
+                            DisplayCandidates::Candidates(candidates) => {
+                                // The conflicting requirement is further down the tree
+                                if depth == 0 {
+                                    writeln!(f, "|-- {req} cannot be installed because:")?;
+                                } else {
+                                    writeln!(
+                                        f,
+                                        "{indent}|-- {req}, which cannot be installed because:"
+                                    )?;
+                                }
 
-                        stack.extend(
-                            requirement
-                                .candidates
-                                .iter()
-                                .map(|c| (DisplayOp::Candidate(c), depth + 1)),
-                        );
+                                stack.extend(
+                                    candidates
+                                        .iter()
+                                        .map(|c| (DisplayOp::Candidate(c), depth + 1)),
+                                );
+                            }
+                            DisplayCandidates::Conflict => {
+                                // We have reached the conflicting requirement
+                                if depth == 0 {
+                                    writeln!(f, "|-- {req} cannot be installed, because it conflicts with the versions reported above.")?;
+                                } else {
+                                    writeln!(f, "{indent}|-- {req}, which conflicts with the already selected version.")?;
+                                }
+                            }
+                            DisplayCandidates::Missing => unreachable!(),
+                        }
                     }
                 }
                 DisplayOp::Candidate(candidate) => {
@@ -157,21 +174,6 @@ impl std::fmt::Display for DisplayError {
                             .iter()
                             .map(|r| (DisplayOp::Requirement(r), depth + 1)),
                     );
-                }
-                DisplayOp::NoCandidates(requirement) => {
-                    if depth == 0 {
-                        writeln!(
-                            f,
-                            "{indent}|-- No candidates where found for {}.",
-                            requirement.name
-                        )?;
-                    } else {
-                        writeln!(
-                            f,
-                            "{indent}|-- {}, for which no candidates where found.",
-                            requirement.name
-                        )?;
-                    }
                 }
             }
         }
@@ -272,14 +274,55 @@ where
         name: String,
         candidate_edges: Vec<EdgeReference<Edge<TRequirement>>>,
     ) -> DisplayRequirement {
+        enum GetDisplayCandidateResult {
+            Missing,
+            Conflict,
+            Candidate(DisplayCandidate),
+        }
+
+        impl GetDisplayCandidateResult {
+            fn installable(&self) -> bool {
+                match self {
+                    GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => false,
+                    GetDisplayCandidateResult::Candidate(c) => c.installable,
+                }
+            }
+        }
+
         let mut candidates = candidate_edges
             .into_iter()
-            .flat_map(|edge| {
-                self.get_display_candidate(display_candidate, display_requirement, edge)
+            .map(|edge| {
+                if edge.weight().status == EdgeStatus::Conflict {
+                    GetDisplayCandidateResult::Conflict
+                } else {
+                    match self.get_display_candidate(display_candidate, display_requirement, edge) {
+                        None => GetDisplayCandidateResult::Missing,
+                        Some(c) => GetDisplayCandidateResult::Candidate(c),
+                    }
+                }
             })
             .collect::<Vec<_>>();
 
-        candidates.sort_by_key(|c| c.installable);
+        candidates.sort_by_key(|c| c.installable());
+
+        let candidates = if candidates.iter().all(|c| matches!(c, GetDisplayCandidateResult::Missing)) {
+            DisplayCandidates::Missing
+        } else if candidates
+            .iter()
+            .all(|c| matches!(c, GetDisplayCandidateResult::Conflict))
+        {
+            DisplayCandidates::Conflict
+        } else {
+            DisplayCandidates::Candidates(
+                candidates
+                    .into_iter()
+                    .flat_map(|c| match c {
+                        GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => None,
+                        GetDisplayCandidateResult::Candidate(c) => Some(c),
+                    })
+                    .collect(),
+            )
+        };
 
         DisplayRequirement::new(name, candidates)
     }
@@ -357,7 +400,7 @@ where
                     };
 
                 let line =
-                    format!(r#"{node1_name} -> {node2_name}[color={color}, label="{label}"];"#);
+                    format!(r#""{node1_name}" -> "{node2_name}"[color={color}, label="{label}"];"#);
                 buf.push_str(&line);
                 buf.push('\n');
             }

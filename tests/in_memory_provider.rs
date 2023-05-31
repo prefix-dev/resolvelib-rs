@@ -533,6 +533,46 @@ fn error_reporting_missing_2() {
 }
 
 #[test]
+fn error_reporting_bluesky_conflict() {
+    let pkgs = vec![
+        pkg("suitcase-utils", 54, vec![]),
+        pkg("suitcase-utils", 53, vec![]),
+        pkg(
+            "bluesky-widgets",
+            42,
+            vec![
+                req("bluesky-live", 0..10),
+                req("numpy", 0..10),
+                req("python", 0..10),
+                req("suitcase-utils", 0..54),
+            ],
+        ),
+        pkg("bluesky-live", 1, vec![]),
+        pkg("numpy", 1, vec![]),
+        pkg("python", 1, vec![]),
+    ];
+
+    let reqs = vec![req("bluesky-widgets", 0..99), req("suitcase-utils", 54..99)];
+
+    let result = try_resolve(&reqs, &pkgs);
+    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
+        let error = err.graph().graphviz(
+            |c| format!("{} {}", c.package_name, c.version),
+            |r| format!("{} {:?}", r.package_name, r.specifier),
+        );
+        println!("{error}");
+
+        let error = err.graph().print_user_friendly_error(
+            |c| format!("{} {}", c.package_name, c.version),
+            |r| format!("{} {:?}", r.package_name, r.specifier),
+        );
+        insta::assert_display_snapshot!(error);
+    } else {
+        panic!("Unexpected result")
+    }
+}
+
+#[test]
 fn error_reporting_pubgrub_article() {
     // Taken from the pubgrub article: https://nex3.medium.com/pubgrub-2fb6470504f
     let pkgs = vec![

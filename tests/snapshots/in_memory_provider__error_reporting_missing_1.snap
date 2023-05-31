@@ -3,6 +3,6 @@ source: tests/in_memory_provider.rs
 expression: error
 ---
 The following packages are incompatible
-|-- A 41..42 is installable;
+|-- A 41..42 will be installed;
 |-- No candidates where found for B 14..15.
 

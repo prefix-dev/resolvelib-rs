@@ -3,15 +3,15 @@ source: tests/in_memory_provider.rs
 expression: error
 ---
 The following packages are incompatible
-|-- icons 100..101 is installable;
-|-- intl 500..501 is installable;
-|-- menu 0..999 is non-installable because there are no viable options:
+|-- icons 100..101 will be installed;
+|-- intl 500..501 will be installed;
+|-- menu 0..999 cannot be installed because:
     |-- menu 150 would require
-        |-- dropdown 200..231, for which there are no viable options:
+        |-- dropdown 200..231, which cannot be installed because:
             |-- dropdown 230 would require
-                |-- icons 200..201, which conflicts with any installable versions previously reported.
+                |-- icons 200..201, which conflicts with the already selected version.
     |-- menu 100 would require
-        |-- dropdown 180..200, for which there are no viable options:
+        |-- dropdown 180..200, which cannot be installed because:
             |-- dropdown 180 would require
-                |-- intl 300..301, which conflicts with any installable versions previously reported.
+                |-- intl 300..301, which conflicts with the already selected version.
 
