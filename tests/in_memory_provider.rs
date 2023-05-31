@@ -1,8 +1,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::ops::Range;
 
-use resolvelib_rs::{Provider, Reporter, ResolutionError, ResolutionResult, Resolver};
+use resolvelib_rs::{
+    Provider, Reporter, ResolutionError, ResolutionImpossible, ResolutionResult, Resolver,
+};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Candidate {
@@ -206,6 +209,18 @@ fn resolve<'a>(
     (result.ok().unwrap(), operations)
 }
 
+fn resolve_fail<'a>(
+    reqs: &'a [Requirement],
+    pkgs: &'a [Candidate],
+) -> ResolutionImpossible<&'a Requirement, &'a Candidate> {
+    let result = try_resolve(&reqs, &pkgs);
+    match result {
+        Ok(_) => panic!("Expected error, but dependency resolution was successful!"),
+        Err(ResolutionError::ResolutionImpossible(err)) => err,
+        Err(_) => panic!("Unexpected error kind!"),
+    }
+}
+
 fn try_resolve<'a>(
     reqs: &'a [Requirement],
     pkgs: &'a [Candidate],
@@ -232,6 +247,15 @@ fn try_resolve_and_report<'a>(
     let resolver = Resolver::new(&p, &r);
     let result = resolver.resolve(reqs.iter().collect());
     (result, r.operations.into_inner())
+}
+
+fn user_friendly_error<'a>(
+    err: &ResolutionImpossible<&'a Requirement, &'a Candidate>,
+) -> impl Display {
+    err.graph().print_user_friendly_error(
+        |c| format!("{} {}", c.package_name, c.version),
+        |r| format!("{} {:?}", r.package_name, r.specifier),
+    )
 }
 
 #[test]
@@ -272,61 +296,39 @@ fn resolve_single() -> anyhow::Result<()> {
 #[test]
 fn resolve_non_existent() {
     let reqs = vec![req("python", 0..10)];
-    let result = try_resolve(&reqs, &[]);
+    let err = resolve_fail(&reqs, &[]);
 
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-
-    if let ResolutionError::ResolutionImpossible(err) = err {
-        let unsatisfied = err.unsatisfied_requirements();
-        assert_eq!(unsatisfied.len(), 1);
-        assert_eq!(unsatisfied[0].parent, None);
-        assert_eq!(unsatisfied[0].requirement.package_name, "python");
-        assert_eq!(unsatisfied[0].requirement.specifier, 0..10);
-    } else {
-        panic!("Wrong error type")
-    }
+    let unsatisfied = err.unsatisfied_requirements();
+    assert_eq!(unsatisfied.len(), 1);
+    assert_eq!(unsatisfied[0].parent, None);
+    assert_eq!(unsatisfied[0].requirement.package_name, "python");
+    assert_eq!(unsatisfied[0].requirement.specifier, 0..10);
 }
 
 #[test]
 fn resolve_unsatisfiable_root() {
     let reqs = vec![req("python", 0..10)];
     let pkgs = vec![pkg("python", 42, vec![])];
-    let result = try_resolve(&reqs, &pkgs);
+    let err = resolve_fail(&reqs, &pkgs);
 
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-
-    if let ResolutionError::ResolutionImpossible(err) = err {
-        let unsatisfied = err.unsatisfied_requirements();
-        assert_eq!(unsatisfied.len(), 1);
-        assert_eq!(unsatisfied[0].parent, None);
-        assert_eq!(unsatisfied[0].requirement.package_name, "python");
-        assert_eq!(unsatisfied[0].requirement.specifier, 0..10);
-    } else {
-        panic!("Wrong error type")
-    }
+    let unsatisfied = err.unsatisfied_requirements();
+    assert_eq!(unsatisfied.len(), 1);
+    assert_eq!(unsatisfied[0].parent, None);
+    assert_eq!(unsatisfied[0].requirement.package_name, "python");
+    assert_eq!(unsatisfied[0].requirement.specifier, 0..10);
 }
 
 #[test]
 fn resolve_unsatisfiable_dep() {
     let reqs = vec![req("python", 0..10)];
     let pkgs = vec![pkg("python", 8, vec![req("foo", 2..4)])];
-    let (result, ops) = try_resolve_and_report(&reqs, &pkgs);
+    let err = resolve_fail(&reqs, &pkgs);
 
-    assert_eq!(ops.len(), 0);
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-
-    if let ResolutionError::ResolutionImpossible(err) = err {
-        let unsatisfied = err.unsatisfied_requirements();
-        assert_eq!(unsatisfied.len(), 1);
-        assert_eq!(unsatisfied[0].parent.unwrap(), &pkgs[0]);
-        assert_eq!(unsatisfied[0].requirement.package_name, "foo");
-        assert_eq!(unsatisfied[0].requirement.specifier, 2..4);
-    } else {
-        panic!("Wrong error type")
-    }
+    let unsatisfied = err.unsatisfied_requirements();
+    assert_eq!(unsatisfied.len(), 1);
+    assert_eq!(unsatisfied[0].parent.unwrap(), &pkgs[0]);
+    assert_eq!(unsatisfied[0].requirement.package_name, "foo");
+    assert_eq!(unsatisfied[0].requirement.specifier, 2..4);
 }
 
 #[test]
@@ -481,55 +483,28 @@ fn resolve_backtrack() {
 #[test]
 fn error_reporting_root_conflict() {
     let pkgs = vec![pkg("A", 2, vec![]), pkg("A", 5, vec![])];
-
     let reqs = vec![req("A", 0..4), req("A", 5..10)];
 
-    let result = try_resolve(&reqs, &pkgs);
-    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
-        let error = err.graph().print_user_friendly_error(
-            |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier),
-        );
-        insta::assert_display_snapshot!(error);
-    } else {
-        panic!("Unexpected result")
-    }
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
 }
 
 #[test]
 fn error_reporting_missing_1() {
     let pkgs = vec![pkg("A", 41, vec![req("B", 15..16)]), pkg("B", 15, vec![])];
-
     let reqs = vec![req("A", 41..42), req("B", 14..15)];
 
-    let result = try_resolve(&reqs, &pkgs);
-    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
-        let error = err.graph().print_user_friendly_error(
-            |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier),
-        );
-        insta::assert_display_snapshot!(error);
-    } else {
-        panic!("Unexpected result")
-    }
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
 }
 
 #[test]
 fn error_reporting_missing_2() {
     let pkgs = vec![pkg("A", 41, vec![req("B", 0..20)])];
-
     let reqs = vec![req("A", 0..999)];
 
-    let result = try_resolve(&reqs, &pkgs);
-    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
-        let error = err.graph().print_user_friendly_error(
-            |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier),
-        );
-        insta::assert_display_snapshot!(error);
-    } else {
-        panic!("Unexpected result")
-    }
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
 }
 
 #[test]
@@ -554,22 +529,8 @@ fn error_reporting_bluesky_conflict() {
 
     let reqs = vec![req("bluesky-widgets", 0..99), req("suitcase-utils", 54..99)];
 
-    let result = try_resolve(&reqs, &pkgs);
-    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
-        let error = err.graph().graphviz(
-            |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier),
-        );
-        println!("{error}");
-
-        let error = err.graph().print_user_friendly_error(
-            |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier),
-        );
-        insta::assert_display_snapshot!(error);
-    } else {
-        panic!("Unexpected result")
-    }
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
 }
 
 #[test]
@@ -592,19 +553,8 @@ fn error_reporting_pubgrub_article() {
         req("intl", 500..501),
     ];
 
-    let resolve = try_resolve(&reqs, &pkgs);
-    assert!(resolve.is_err());
-
-    let error = resolve.err().unwrap_or_else(|| panic!("expected error!"));
-    if let ResolutionError::ResolutionImpossible(err) = error {
-        let error = err.graph().print_user_friendly_error(
-            |c| format!("{} {}", c.package_name, c.version),
-            |r| format!("{} {:?}", r.package_name, r.specifier),
-        );
-        insta::assert_display_snapshot!(error);
-    } else {
-        panic!("Unexpected error");
-    }
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
 }
 
 fn check_ops(ops: &[Operation], expected: &str) {

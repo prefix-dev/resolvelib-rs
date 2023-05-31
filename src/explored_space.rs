@@ -283,7 +283,9 @@ where
         impl GetDisplayCandidateResult {
             fn installable(&self) -> bool {
                 match self {
-                    GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => false,
+                    GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => {
+                        false
+                    }
                     GetDisplayCandidateResult::Candidate(c) => c.installable,
                 }
             }
@@ -305,7 +307,10 @@ where
 
         candidates.sort_by_key(|c| c.installable());
 
-        let candidates = if candidates.iter().all(|c| matches!(c, GetDisplayCandidateResult::Missing)) {
+        let candidates = if candidates
+            .iter()
+            .all(|c| matches!(c, GetDisplayCandidateResult::Missing))
+        {
             DisplayCandidates::Missing
         } else if candidates
             .iter()
@@ -317,7 +322,8 @@ where
                 candidates
                     .into_iter()
                     .flat_map(|c| match c {
-                        GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => None,
+                        GetDisplayCandidateResult::Missing
+                        | GetDisplayCandidateResult::Conflict => None,
                         GetDisplayCandidateResult::Candidate(c) => Some(c),
                     })
                     .collect(),
