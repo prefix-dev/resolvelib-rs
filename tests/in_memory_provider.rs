@@ -557,6 +557,21 @@ fn error_reporting_pubgrub_article() {
     insta::assert_display_snapshot!(user_friendly_error(&err));
 }
 
+#[test]
+fn error_reporting_graph_compression() {
+    let pkgs = vec![
+        pkg("A", 10, vec![req("B", 0..99)]),
+        pkg("A", 9, vec![req("B", 0..99)]),
+        pkg("B", 100, vec![]),
+        pkg("B", 42, vec![]),
+    ];
+
+    let reqs = vec![req("A", 0..99), req("B", 100..999)];
+
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
+}
+
 fn check_ops(ops: &[Operation], expected: &str) {
     let expected: Vec<_> = expected
         .lines()

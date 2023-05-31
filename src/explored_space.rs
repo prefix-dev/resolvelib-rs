@@ -3,10 +3,12 @@ use crate::RequirementKind;
 use itertools::Itertools;
 use petgraph::graph::{DiGraph, EdgeReference, NodeIndex};
 use petgraph::prelude::{Bfs, EdgeRef};
-use rustc_hash::FxHashMap;
-use std::collections::HashMap;
+use petgraph::Direction;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Formatter;
 use std::hash::Hash;
+use std::rc::Rc;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum Node<TCandidate> {
@@ -79,16 +81,25 @@ impl DisplayRequirement {
 
 pub struct DisplayCandidate {
     name: String,
+    node_id: NodeIndex,
     requirements: Vec<DisplayRequirement>,
     installable: bool,
 }
 
+struct MergedCandidate {
+    names: Vec<String>,
+    ids: Vec<NodeIndex>,
+}
+
 pub struct DisplayError {
     root_requirements: Vec<DisplayRequirement>,
+    merged_candidates: FxHashMap<NodeIndex, Rc<MergedCandidate>>,
 }
 
 impl std::fmt::Display for DisplayError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut reported: FxHashSet<NodeIndex> = HashSet::default();
+
         pub enum DisplayOp<'a> {
             Requirement(&'a DisplayRequirement),
             Candidate(&'a DisplayCandidate),
@@ -162,12 +173,21 @@ impl std::fmt::Display for DisplayError {
                         }
                     }
                 }
-                DisplayOp::Candidate(candidate) => {
-                    if candidate.requirements.is_empty() {
-                        writeln!(f, "{indent}|-- {}", candidate.name)?;
+                DisplayOp::Candidate(candidate) if !reported.contains(&candidate.node_id) => {
+                    let name = if let Some(merged) = self.merged_candidates.get(&candidate.node_id)
+                    {
+                        reported.extend(&merged.ids);
+                        merged.names.join(" | ")
                     } else {
-                        writeln!(f, "{indent}|-- {} would require", candidate.name)?;
+                        candidate.name.clone()
+                    };
+
+                    if candidate.requirements.is_empty() {
+                        writeln!(f, "{indent}|-- {name}")?;
+                    } else {
+                        writeln!(f, "{indent}|-- {name} would require")?;
                     }
+
                     stack.extend(
                         candidate
                             .requirements
@@ -175,6 +195,7 @@ impl std::fmt::Display for DisplayError {
                             .map(|r| (DisplayOp::Requirement(r), depth + 1)),
                     );
                 }
+                _ => {}
             }
         }
 
@@ -245,10 +266,9 @@ where
         display_candidate: impl Fn(TCandidate) -> String,
         display_requirement: impl Fn(TRequirement) -> String,
     ) -> DisplayError {
+        // Build a tree from the root requirements to the conflicts
         let root_node = self.node_ids[&Node::Root];
-        let mut error = DisplayError {
-            root_requirements: Vec::new(),
-        };
+        let mut root_requirements = Vec::new();
         let top_level_edges = self
             .graph
             .edges(root_node)
@@ -261,10 +281,55 @@ where
                 display_requirement(requirement),
                 candidates.collect(),
             );
-            error.root_requirements.push(req);
+            root_requirements.push(req);
         }
 
-        error
+        // Gather information about nodes that can be merged
+        let mut maybe_merge = FxHashMap::default();
+        for node_id in self.graph.node_indices() {
+            let candidate = match &self.graph[node_id] {
+                Node::Root | Node::NotFound => continue,
+                Node::Candidate(c) => c,
+            };
+
+            let predecessors: Vec<_> = self
+                .graph
+                .edges_directed(node_id, Direction::Incoming)
+                .map(|e| e.source())
+                .sorted()
+                .collect();
+            let successors: Vec<_> = self
+                .graph
+                .edges(node_id)
+                .map(|e| e.target())
+                .sorted()
+                .collect();
+
+            let entry = maybe_merge
+                .entry((predecessors, successors))
+                .or_insert(MergedCandidate {
+                    ids: Vec::new(),
+                    names: Vec::new(),
+                });
+
+            entry.ids.push(node_id);
+            entry.names.push(display_candidate(candidate.clone()));
+        }
+
+        let mut merged_candidates = HashMap::default();
+        for m in maybe_merge.into_values() {
+            if m.ids.len() > 1 {
+                let m = Rc::new(m);
+                for id in &m.ids {
+                    merged_candidates.insert(id.clone(), m.clone());
+                }
+            }
+        }
+
+        DisplayError {
+            root_requirements,
+            merged_candidates,
+        }
     }
 
     fn get_display_requirement(
@@ -358,6 +423,7 @@ where
 
                 Some(DisplayCandidate {
                     name: display_candidate(c.clone()),
+                    node_id: edge_to_candidate.target(),
                     installable: edge_to_candidate.weight().status == EdgeStatus::Healthy
                         && reqs.iter().all(|r| r.installable),
                     requirements: reqs,
