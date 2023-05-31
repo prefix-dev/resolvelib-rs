@@ -98,8 +98,13 @@ impl std::fmt::Display for DisplayError {
 
                     if requirement.candidates.is_empty() {
                         stack.push((DisplayOp::NoCandidates(requirement), depth));
-                    } else if requirement.candidates.len() == 1 {
-                        // This is a leaf in the graph
+                    } else if requirement.candidates.len() == 1
+                        && requirement.candidates[0]
+                            .requirements
+                            .iter()
+                            .all(|r| r.installable)
+                    {
+                        // Treat this requirement as a leaf
                         if installable {
                             if depth == 0 {
                                 writeln!(f, "|-- {req} is installable;")?;
@@ -119,13 +124,16 @@ impl std::fmt::Display for DisplayError {
                             if installable {
                                 writeln!(f, "|-- {req} is installable with the potential options")?;
                             } else {
-                                writeln!(f, "|-- {req} is non-installable because there are no viable options")?;
+                                writeln!(f, "|-- {req} is non-installable because there are no viable options:")?;
                             }
                         } else {
                             if installable {
                                 writeln!(f, "{indent}|-- {req}, which is installable with the potential options")?;
                             } else {
-                                writeln!(f, "{indent}|-- {req}, which is non-installable because there are no viable options")?;
+                                writeln!(
+                                    f,
+                                    "{indent}|-- {req}, for which there are no viable options:"
+                                )?;
                             }
                         }
 
@@ -151,11 +159,19 @@ impl std::fmt::Display for DisplayError {
                     );
                 }
                 DisplayOp::NoCandidates(requirement) => {
-                    writeln!(
-                        f,
-                        "{indent}|-- No candidates where found for {}.",
-                        requirement.name
-                    )?;
+                    if depth == 0 {
+                        writeln!(
+                            f,
+                            "{indent}|-- No candidates where found for {}.",
+                            requirement.name
+                        )?;
+                    } else {
+                        writeln!(
+                            f,
+                            "{indent}|-- {}, for which no candidates where found.",
+                            requirement.name
+                        )?;
+                    }
                 }
             }
         }
@@ -259,11 +275,7 @@ where
         let mut candidates = candidate_edges
             .into_iter()
             .flat_map(|edge| {
-                self.get_display_candidate(
-                    display_candidate,
-                    display_requirement,
-                    edge,
-                )
+                self.get_display_candidate(display_candidate, display_requirement, edge)
             })
             .collect::<Vec<_>>();
 
@@ -297,7 +309,8 @@ where
 
                 Some(DisplayCandidate {
                     name: display_candidate(c.clone()),
-                    installable: edge_to_candidate.weight().status == EdgeStatus::Healthy && reqs.iter().all(|r| r.installable),
+                    installable: edge_to_candidate.weight().status == EdgeStatus::Healthy
+                        && reqs.iter().all(|r| r.installable),
                     requirements: reqs,
                 })
             }

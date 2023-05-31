@@ -1,0 +1,9 @@
+---
+source: tests/in_memory_provider.rs
+expression: error
+---
+The following packages are incompatible
+|-- A 0..999 is non-installable because there are no viable options:
+    |-- A 41 would require
+        |-- B 0..20, for which no candidates where found.
+

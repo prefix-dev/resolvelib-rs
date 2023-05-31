@@ -5,9 +5,13 @@ expression: error
 The following packages are incompatible
 |-- icons 100..101 is installable;
 |-- intl 500..501 is installable;
-|-- menu 0..999 is non-installable because there are no viable options
+|-- menu 0..999 is non-installable because there are no viable options:
     |-- menu 150 would require
-        |-- dropdown 200..231, which conflicts with any installable versions previously reported.
+        |-- dropdown 200..231, for which there are no viable options:
+            |-- dropdown 230 would require
+                |-- icons 200..201, which conflicts with any installable versions previously reported.
     |-- menu 100 would require
-        |-- dropdown 180..200, which conflicts with any installable versions previously reported.
+        |-- dropdown 180..200, for which there are no viable options:
+            |-- dropdown 180 would require
+                |-- intl 300..301, which conflicts with any installable versions previously reported.
 

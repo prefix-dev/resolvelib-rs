@@ -497,20 +497,31 @@ fn error_reporting_root_conflict() {
 }
 
 #[test]
-fn error_reporting_missing() {
-    let pkgs = vec![
-        pkg("A", 41, vec![req("B", 15..16)]),
-        pkg("B", 15, vec![]),
-    ];
+fn error_reporting_missing_1() {
+    let pkgs = vec![pkg("A", 41, vec![req("B", 15..16)]), pkg("B", 15, vec![])];
 
     let reqs = vec![req("A", 41..42), req("B", 14..15)];
 
     let result = try_resolve(&reqs, &pkgs);
     if let Err(ResolutionError::ResolutionImpossible(err)) = result {
-        let graphviz = err.graph().graphviz(|c| format!("{}{}", c.package_name, c.version),
-                             |r| format!("{:?}", r.specifier),);
-        println!("{graphviz}");
+        let error = err.graph().print_user_friendly_error(
+            |c| format!("{} {}", c.package_name, c.version),
+            |r| format!("{} {:?}", r.package_name, r.specifier),
+        );
+        insta::assert_display_snapshot!(error);
+    } else {
+        panic!("Unexpected result")
+    }
+}
 
+#[test]
+fn error_reporting_missing_2() {
+    let pkgs = vec![pkg("A", 41, vec![req("B", 0..20)])];
+
+    let reqs = vec![req("A", 0..999)];
+
+    let result = try_resolve(&reqs, &pkgs);
+    if let Err(ResolutionError::ResolutionImpossible(err)) = result {
         let error = err.graph().print_user_friendly_error(
             |c| format!("{} {}", c.package_name, c.version),
             |r| format!("{} {:?}", r.package_name, r.specifier),
