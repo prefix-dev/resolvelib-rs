@@ -3,6 +3,7 @@ use crate::RequirementKind;
 use itertools::Itertools;
 use petgraph::graph::{DiGraph, EdgeReference, NodeIndex};
 use petgraph::prelude::{Bfs, EdgeRef};
+use petgraph::visit::DfsPostOrder;
 use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
@@ -175,13 +176,13 @@ impl std::fmt::Display for DisplayError {
                     }
                 }
                 DisplayOp::Candidate(candidate) if !reported.contains(&candidate.node_id) => {
-                    let version = if let Some(merged) = self.merged_candidates.get(&candidate.node_id)
-                    {
-                        reported.extend(&merged.ids);
-                        merged.versions.join(" | ")
-                    } else {
-                        candidate.version.clone()
-                    };
+                    let version =
+                        if let Some(merged) = self.merged_candidates.get(&candidate.node_id) {
+                            reported.extend(&merged.ids);
+                            merged.versions.join(" | ")
+                        } else {
+                            candidate.version.clone()
+                        };
 
                     if candidate.requirements.is_empty() {
                         writeln!(f, "{indent}|-- {} {version}", candidate.name)?;
@@ -201,6 +202,21 @@ impl std::fmt::Display for DisplayError {
         }
 
         Ok(())
+    }
+}
+
+enum GetDisplayCandidateResult {
+    Missing,
+    Conflict,
+    Candidate(DisplayCandidate),
+}
+
+impl GetDisplayCandidateResult {
+    fn installable(&self) -> bool {
+        match self {
+            GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => false,
+            GetDisplayCandidateResult::Candidate(c) => c.installable,
+        }
     }
 }
 
@@ -262,12 +278,13 @@ where
             .add_edge(node1, node2, Edge::healthy(requirement, kind));
     }
 
-    pub fn print_user_friendly_error<K: Ord>(
+    pub fn print_user_friendly_error<K1: Ord, K2: Ord>(
         &self,
         display_candidate_name: impl Fn(TCandidate) -> String,
         display_candidate_version: impl Fn(TCandidate) -> String,
-        sort_candidate_version: impl Fn(&TCandidate) -> K,
+        sort_candidate_version: impl Fn(&TCandidate) -> K1,
         display_requirement: impl Fn(TRequirement) -> String,
+        sort_requirement: impl Fn(&TRequirement) -> K2,
     ) -> DisplayError {
         // Build a tree from the root requirements to the conflicts
         let root_node = self.node_ids[&Node::Root];
@@ -277,8 +294,10 @@ where
             .edges(root_node)
             .group_by(|e| e.weight().requirement.clone());
 
+        let mut path = FxHashSet::default();
         for (requirement, candidates) in top_level_edges.into_iter() {
             let req = self.get_display_requirement(
+                &mut path,
                 &display_candidate_name,
                 &display_candidate_version,
                 &display_requirement,
@@ -296,17 +315,28 @@ where
                 Node::Candidate(c) => c,
             };
 
+            if self
+                .graph
+                .edges_directed(node_id, Direction::Incoming)
+                .any(|e| e.weight().status == EdgeStatus::Conflict)
+            {
+                // Nodes that are the target of a conflict should never be merged
+                continue;
+            }
+
             let predecessors: Vec<_> = self
                 .graph
                 .edges_directed(node_id, Direction::Incoming)
                 .map(|e| e.source())
-                .sorted()
+                .sorted_unstable()
                 .collect();
             let successors: Vec<_> = self
                 .graph
                 .edges(node_id)
-                .map(|e| e.target())
-                .sorted()
+                .map(|e| (e.target(), &e.weight().requirement))
+                .sorted_unstable_by_key(|&(target_node, requirement)| {
+                    (target_node, sort_requirement(requirement))
+                })
                 .collect();
 
             let name = display_candidate_name(candidate.clone());
@@ -325,7 +355,11 @@ where
                 m.1.sort_unstable_by_key(&sort_candidate_version);
                 let m = Rc::new(MergedCandidate {
                     ids: m.0,
-                    versions: m.1.into_iter().map(|c| display_candidate_version(c)).collect(),
+                    versions: m
+                        .1
+                        .into_iter()
+                        .map(|c| display_candidate_version(c))
+                        .collect(),
                 });
                 for id in &m.ids {
                     merged_candidates.insert(id.clone(), m.clone());
@@ -341,40 +375,23 @@ where
 
     fn get_display_requirement(
         &self,
+        path: &mut FxHashSet<NodeIndex>,
         display_candidate_name: &impl Fn(TCandidate) -> String,
         display_candidate_version: &impl Fn(TCandidate) -> String,
         display_requirement: &impl Fn(TRequirement) -> String,
         name: String,
         candidate_edges: Vec<EdgeReference<Edge<TRequirement>>>,
     ) -> DisplayRequirement {
-        enum GetDisplayCandidateResult {
-            Missing,
-            Conflict,
-            Candidate(DisplayCandidate),
-        }
-
-        impl GetDisplayCandidateResult {
-            fn installable(&self) -> bool {
-                match self {
-                    GetDisplayCandidateResult::Missing | GetDisplayCandidateResult::Conflict => {
-                        false
-                    }
-                    GetDisplayCandidateResult::Candidate(c) => c.installable,
-                }
-            }
-        }
-
         let mut candidates = candidate_edges
             .into_iter()
             .map(|edge| {
-                if edge.weight().status == EdgeStatus::Conflict {
-                    GetDisplayCandidateResult::Conflict
-                } else {
-                    match self.get_display_candidate(display_candidate_name, display_candidate_version, display_requirement, edge) {
-                        None => GetDisplayCandidateResult::Missing,
-                        Some(c) => GetDisplayCandidateResult::Candidate(c),
-                    }
-                }
+                self.get_display_candidate(
+                    path,
+                    display_candidate_name,
+                    display_candidate_version,
+                    display_requirement,
+                    edge,
+                )
             })
             .collect::<Vec<_>>();
 
@@ -408,13 +425,35 @@ where
 
     fn get_display_candidate(
         &self,
+        path: &mut FxHashSet<NodeIndex>,
         display_candidate_name: &impl Fn(TCandidate) -> String,
         display_candidate_version: &impl Fn(TCandidate) -> String,
         display_requirement: &impl Fn(TRequirement) -> String,
         edge_to_candidate: EdgeReference<Edge<TRequirement>>,
-    ) -> Option<DisplayCandidate> {
+    ) -> GetDisplayCandidateResult {
+        if edge_to_candidate.weight().status == EdgeStatus::Conflict {
+            return GetDisplayCandidateResult::Conflict;
+        }
+
         match &self.graph[edge_to_candidate.target()] {
             Node::Candidate(c) => {
+                let name = display_candidate_name(c.clone());
+                let version = display_candidate_version(c.clone());
+                let node_id = edge_to_candidate.target();
+
+                // If already visited, return the same candidate, but without requirements
+                if path.contains(&node_id) {
+                    return GetDisplayCandidateResult::Candidate(DisplayCandidate {
+                        name,
+                        version,
+                        node_id,
+                        requirements: vec![],
+                        installable: true,
+                    });
+                }
+
+                path.insert(node_id);
+
                 let candidate_dependencies = self
                     .graph
                     .edges(edge_to_candidate.target())
@@ -423,6 +462,7 @@ where
                 let mut reqs = Vec::new();
                 for (requirement, edges) in candidate_dependencies.into_iter() {
                     reqs.push(self.get_display_requirement(
+                        path,
                         display_candidate_name,
                         display_candidate_version,
                         display_requirement,
@@ -431,16 +471,18 @@ where
                     ));
                 }
 
-                Some(DisplayCandidate {
-                    name: display_candidate_name(c.clone()),
-                    version: display_candidate_version(c.clone()),
-                    node_id: edge_to_candidate.target(),
+                path.remove(&node_id);
+
+                GetDisplayCandidateResult::Candidate(DisplayCandidate {
+                    name,
+                    version,
+                    node_id,
                     installable: edge_to_candidate.weight().status == EdgeStatus::Healthy
                         && reqs.iter().all(|r| r.installable),
                     requirements: reqs,
                 })
             }
-            Node::NotFound => None,
+            Node::NotFound => GetDisplayCandidateResult::Missing,
             _ => unreachable!(),
         }
     }
@@ -449,13 +491,42 @@ where
         &self,
         display_candidate: impl Fn(TCandidate) -> String,
         display_requirement: impl Fn(TRequirement) -> String,
+        only_conflicting_paths: bool,
     ) -> String {
         let root_node = self.node_ids[&Node::Root];
         let mut bfs = Bfs::new(&self.graph, root_node);
 
+        let mut interesting_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+        if only_conflicting_paths {
+            let mut dfs = DfsPostOrder::new(&self.graph, root_node);
+            while let Some(nx) = dfs.next(&self.graph) {
+                // Two kinds of interesting nodes:
+                // * Nodes that have an edge to an existing interesting node
+                // * Nodes that have incoming conflict edges
+                if self
+                    .graph
+                    .edges(nx)
+                    .any(|e| interesting_nodes.contains(&e.target()))
+                    || self
+                        .graph
+                        .edges_directed(nx, Direction::Incoming)
+                        .any(|e| e.weight().status == EdgeStatus::Conflict)
+                {
+                    interesting_nodes.insert(nx);
+                }
+            }
+            if let Some(nx) = self.node_ids.get(&Node::NotFound) {
+                interesting_nodes.insert(nx.clone());
+            }
+        }
+
         let mut buf = String::new();
         buf.push_str("digraph {\n");
         while let Some(nx) = bfs.next(&self.graph) {
+            if only_conflicting_paths && !interesting_nodes.contains(&nx) {
+                continue;
+            }
+
             // The node itself
             let node1 = self.graph.node_weight(nx).unwrap();
             let node1_name = match node1 {
@@ -466,6 +537,10 @@ where
 
             for edge in self.graph.edges(nx) {
                 let neighbor = edge.target();
+
+                if only_conflicting_paths && !interesting_nodes.contains(&neighbor) {
+                    continue;
+                }
 
                 let node2 = self.graph.node_weight(neighbor).unwrap();
                 let node2_name = match node2 {

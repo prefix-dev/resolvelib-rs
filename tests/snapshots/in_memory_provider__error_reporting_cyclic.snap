@@ -1,0 +1,13 @@
+---
+source: tests/in_memory_provider.rs
+expression: user_friendly_error(&err)
+---
+The following packages are incompatible
+|-- C 50..55 cannot be installed because:
+    |-- C 50 would require
+        |-- A 5..10, which cannot be installed because:
+            |-- A 5 would require
+                |-- B 10..20, which cannot be installed because:
+                    |-- B 10 would require
+                        |-- A 2..4, which conflicts with the already selected version.
+

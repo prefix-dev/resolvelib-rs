@@ -257,6 +257,7 @@ fn user_friendly_error<'a>(
         |c| format!("{}", c.version),
         |c| c.version,
         |r| format!("{} {:?}", r.package_name, r.specifier),
+        |&r| (&r.package_name, r.specifier.start, r.specifier.end),
     )
 }
 
@@ -483,6 +484,20 @@ fn resolve_backtrack() {
 }
 
 #[test]
+fn resolve_cyclic() {
+    let pkgs = vec![
+        pkg("A", 2, vec![req("B", 0..10)]),
+        pkg("B", 5, vec![req("A", 2..4)]),
+    ];
+    let reqs = vec![req("A", 0..99)];
+
+    let (result, _) = resolve(&reqs, &pkgs);
+    assert_eq!(result.mapping.len(), 2);
+    assert_eq!(result.mapping["A"].version, 2);
+    assert_eq!(result.mapping["B"].version, 5);
+}
+
+#[test]
 fn error_reporting_root_conflict() {
     let pkgs = vec![pkg("A", 2, vec![]), pkg("A", 5, vec![])];
     let reqs = vec![req("A", 0..4), req("A", 5..10)];
@@ -560,7 +575,7 @@ fn error_reporting_pubgrub_article() {
 }
 
 #[test]
-fn error_reporting_graph_compression() {
+fn error_reporting_graph_compression_simple() {
     let pkgs = vec![
         pkg("A", 10, vec![req("B", 0..99)]),
         pkg("A", 9, vec![req("B", 0..99)]),
@@ -569,6 +584,19 @@ fn error_reporting_graph_compression() {
     ];
 
     let reqs = vec![req("A", 0..99), req("B", 100..999)];
+
+    let err = resolve_fail(&reqs, &pkgs);
+    insta::assert_display_snapshot!(user_friendly_error(&err));
+}
+
+#[test]
+fn error_reporting_cyclic() {
+    let pkgs = vec![
+        pkg("A", 5, vec![req("B", 10..20)]),
+        pkg("B", 10, vec![req("A", 2..4)]),
+        pkg("C", 50, vec![req("A", 5..10)]),
+    ];
+    let reqs = vec![req("C", 50..55)];
 
     let err = resolve_fail(&reqs, &pkgs);
     insta::assert_display_snapshot!(user_friendly_error(&err));
