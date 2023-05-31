@@ -5,6 +5,6 @@ expression: user_friendly_error(&err)
 The following packages are incompatible
 |-- B 100..999 will be installed;
 |-- A 0..99 cannot be installed because:
-    |-- A 10 | A 9 would require
+    |-- A 9 | 10 would require
         |-- B 0..99, which conflicts with the already selected version.
 

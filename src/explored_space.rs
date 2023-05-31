@@ -81,13 +81,14 @@ impl DisplayRequirement {
 
 pub struct DisplayCandidate {
     name: String,
+    version: String,
     node_id: NodeIndex,
     requirements: Vec<DisplayRequirement>,
     installable: bool,
 }
 
 struct MergedCandidate {
-    names: Vec<String>,
+    versions: Vec<String>,
     ids: Vec<NodeIndex>,
 }
 
@@ -174,18 +175,18 @@ impl std::fmt::Display for DisplayError {
                     }
                 }
                 DisplayOp::Candidate(candidate) if !reported.contains(&candidate.node_id) => {
-                    let name = if let Some(merged) = self.merged_candidates.get(&candidate.node_id)
+                    let version = if let Some(merged) = self.merged_candidates.get(&candidate.node_id)
                     {
                         reported.extend(&merged.ids);
-                        merged.names.join(" | ")
+                        merged.versions.join(" | ")
                     } else {
-                        candidate.name.clone()
+                        candidate.version.clone()
                     };
 
                     if candidate.requirements.is_empty() {
-                        writeln!(f, "{indent}|-- {name}")?;
+                        writeln!(f, "{indent}|-- {} {version}", candidate.name)?;
                     } else {
-                        writeln!(f, "{indent}|-- {name} would require")?;
+                        writeln!(f, "{indent}|-- {} {version} would require", candidate.name)?;
                     }
 
                     stack.extend(
@@ -261,9 +262,11 @@ where
             .add_edge(node1, node2, Edge::healthy(requirement, kind));
     }
 
-    pub fn print_user_friendly_error(
+    pub fn print_user_friendly_error<K: Ord>(
         &self,
-        display_candidate: impl Fn(TCandidate) -> String,
+        display_candidate_name: impl Fn(TCandidate) -> String,
+        display_candidate_version: impl Fn(TCandidate) -> String,
+        sort_candidate_version: impl Fn(&TCandidate) -> K,
         display_requirement: impl Fn(TRequirement) -> String,
     ) -> DisplayError {
         // Build a tree from the root requirements to the conflicts
@@ -276,7 +279,8 @@ where
 
         for (requirement, candidates) in top_level_edges.into_iter() {
             let req = self.get_display_requirement(
-                &display_candidate,
+                &display_candidate_name,
+                &display_candidate_version,
                 &display_requirement,
                 display_requirement(requirement),
                 candidates.collect(),
@@ -305,21 +309,24 @@ where
                 .sorted()
                 .collect();
 
-            let entry = maybe_merge
-                .entry((predecessors, successors))
-                .or_insert(MergedCandidate {
-                    ids: Vec::new(),
-                    names: Vec::new(),
-                });
+            let name = display_candidate_name(candidate.clone());
 
-            entry.ids.push(node_id);
-            entry.names.push(display_candidate(candidate.clone()));
+            let entry = maybe_merge
+                .entry((name.clone(), predecessors, successors))
+                .or_insert((Vec::new(), Vec::new()));
+
+            entry.0.push(node_id);
+            entry.1.push(candidate.clone());
         }
 
         let mut merged_candidates = HashMap::default();
-        for m in maybe_merge.into_values() {
-            if m.ids.len() > 1 {
-                let m = Rc::new(m);
+        for mut m in maybe_merge.into_values() {
+            if m.0.len() > 1 {
+                m.1.sort_unstable_by_key(&sort_candidate_version);
+                let m = Rc::new(MergedCandidate {
+                    ids: m.0,
+                    versions: m.1.into_iter().map(|c| display_candidate_version(c)).collect(),
+                });
                 for id in &m.ids {
                     merged_candidates.insert(id.clone(), m.clone());
                 }
@@ -334,7 +341,8 @@ where
 
     fn get_display_requirement(
         &self,
-        display_candidate: &impl Fn(TCandidate) -> String,
+        display_candidate_name: &impl Fn(TCandidate) -> String,
+        display_candidate_version: &impl Fn(TCandidate) -> String,
         display_requirement: &impl Fn(TRequirement) -> String,
         name: String,
         candidate_edges: Vec<EdgeReference<Edge<TRequirement>>>,
@@ -362,7 +370,7 @@ where
                 if edge.weight().status == EdgeStatus::Conflict {
                     GetDisplayCandidateResult::Conflict
                 } else {
-                    match self.get_display_candidate(display_candidate, display_requirement, edge) {
+                    match self.get_display_candidate(display_candidate_name, display_candidate_version, display_requirement, edge) {
                         None => GetDisplayCandidateResult::Missing,
                         Some(c) => GetDisplayCandidateResult::Candidate(c),
                     }
@@ -400,7 +408,8 @@ where
 
     fn get_display_candidate(
         &self,
-        display_candidate: &impl Fn(TCandidate) -> String,
+        display_candidate_name: &impl Fn(TCandidate) -> String,
+        display_candidate_version: &impl Fn(TCandidate) -> String,
         display_requirement: &impl Fn(TRequirement) -> String,
         edge_to_candidate: EdgeReference<Edge<TRequirement>>,
     ) -> Option<DisplayCandidate> {
@@ -414,7 +423,8 @@ where
                 let mut reqs = Vec::new();
                 for (requirement, edges) in candidate_dependencies.into_iter() {
                     reqs.push(self.get_display_requirement(
-                        display_candidate,
+                        display_candidate_name,
+                        display_candidate_version,
                         display_requirement,
                         display_requirement(requirement),
                         edges.collect(),
@@ -422,7 +432,8 @@ where
                 }
 
                 Some(DisplayCandidate {
-                    name: display_candidate(c.clone()),
+                    name: display_candidate_name(c.clone()),
+                    version: display_candidate_version(c.clone()),
                     node_id: edge_to_candidate.target(),
                     installable: edge_to_candidate.weight().status == EdgeStatus::Healthy
                         && reqs.iter().all(|r| r.installable),

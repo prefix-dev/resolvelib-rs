@@ -253,7 +253,9 @@ fn user_friendly_error<'a>(
     err: &ResolutionImpossible<&'a Requirement, &'a Candidate>,
 ) -> impl Display {
     err.graph().print_user_friendly_error(
-        |c| format!("{} {}", c.package_name, c.version),
+        |c| format!("{}", c.package_name),
+        |c| format!("{}", c.version),
+        |c| c.version,
         |r| format!("{} {:?}", r.package_name, r.specifier),
     )
 }
