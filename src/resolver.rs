@@ -268,6 +268,11 @@ where
                     ));
                 }
             } else {
+                // We just pinned a new candidate, and updated the criteria with the candidate's
+                // dependencies and constraints. The resulting criteria must have at least one
+                // candidate, but it is not required that existing mappings are still satisfied. In
+                // fact, since we have more requirements now, there is always a chance that an
+                // existing mapping becomes invalidated (i.e. is no longer satisfiable)
                 let invalidated_names = self
                     .state
                     .criteria
@@ -278,11 +283,7 @@ where
                     .map(|(&k, _)| k)
                     .collect();
 
-                // If the previous iteration backtracked, and the current iteration
-                // succeeded at pinning, we will need to remove outdated mappings
-                //
-                // Here we remove the requirements contributed by the invalidated
-                // names (unsatisfied names that were previously satisfied)
+                // Remove the requirements contributed by invalidated mappings
                 self.remove_information_from_criteria(&invalidated_names);
 
                 // Pinning was successful. Push a new state to do another pin.
